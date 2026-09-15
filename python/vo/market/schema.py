@@ -20,6 +20,22 @@ KNOWN DEFECTS IN v1 — see tests/unit/test_bridge_contract.py, fixed in Phase 3
         description containing a quote or a backslash produces a malformed
         record.
 
+PLATFORM SCOPE.
+v1 is MT5-shaped because MT5 is the only source so far, but MT5 is the first
+platform, not the only intended one. Two things in v1 are therefore known to be
+provisional:
+
+    `source` fuses platform, server and symbol into one string
+    ("MT5:US100.n"). v2 decomposes it, because a provenance string that has to
+    be parsed is not provenance.
+
+    `timeframe` carries MT5's own spelling. The codec maps it to a canonical
+    form in Phase 5, so nothing above the codec learns MT5's vocabulary.
+
+Anything a second platform would spell differently belongs behind the codec.
+Anything a second platform might not provide at all belongs in source
+capabilities, not in a per-record sentinel value.
+
 This module contains no market interpretation and no trading logic.
 """
 
@@ -110,7 +126,13 @@ BAR_V1 = RecordSpec(
         FieldSpec("close", FieldKind.FLOAT),
         FieldSpec("tick_volume", FieldKind.INT,
                   "BROKER-REPORTED price-change count, not a count of ticks held"),
-        FieldSpec("real_volume", FieldKind.INT, "0 where the broker provides none"),
+        FieldSpec("real_volume", FieldKind.INT,
+                  "raw as reported. 1xTrade-Server does not provide real "
+                  "volume and always reports 0, which is a correct raw "
+                  "observation but is INDISTINGUISHABLE from a genuine zero. "
+                  "Whether a source provides real volume is a property of the "
+                  "source, not of the bar: recorded once in source "
+                  "capabilities (Phase 3), never inferred per-bar"),
         FieldSpec("timeframe", FieldKind.STRING,
                   "the bridge emits MT5 spelling (PERIOD_M1); hand-written "
                   "fixtures use the short form (M1). v1 accepts both; Phase 5 "
