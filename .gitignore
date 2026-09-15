@@ -1,0 +1,61 @@
+# ══════════════════════════════════════════════════════════════
+# CREDENTIALS & SECRETS — never commit
+# These entries exist BEFORE the files they protect (Phase 0).
+# ══════════════════════════════════════════════════════════════
+.env
+.env.*
+!.env.example
+credentials/*
+!credentials/.gitignore
+!credentials/README.md
+*.key
+*.pem
+*.p12
+secrets.json
+mt5_account.json
+
+# ══════════════════════════════════════════════════════════════
+# MARKET DATA — captured payloads are large and re-capturable.
+# The repo tracks code and schema, never the archive.
+# ══════════════════════════════════════════════════════════════
+data/**
+!data/**/.gitkeep
+
+# ══════════════════════════════════════════════════════════════
+# LOGS
+# ══════════════════════════════════════════════════════════════
+*.log
+logs/
+
+# ══════════════════════════════════════════════════════════════
+# PYTHON
+# ══════════════════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ══════════════════════════════════════════════════════════════
+# VIRTUAL ENVIRONMENTS
+# ══════════════════════════════════════════════════════════════
+.venv/
+venv/
+env/
+
+# ══════════════════════════════════════════════════════════════
+# METATRADER — compiled output is a build artifact, not source
+# ══════════════════════════════════════════════════════════════
+*.ex5
+*.ex4
+
+# ══════════════════════════════════════════════════════════════
+# EDITORS / OS
+# ══════════════════════════════════════════════════════════════
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
