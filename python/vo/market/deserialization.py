@@ -73,6 +73,8 @@ def dict_to_record(
 
     record_type = data.get("record_type")
 
+    required: tuple[str, ...]
+
 
 
     if record_type == "tick":
