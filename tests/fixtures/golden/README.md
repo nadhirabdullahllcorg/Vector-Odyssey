@@ -6,9 +6,10 @@ Nothing here is hand-written, hand-corrected, or reformatted. Ever.
 ## Why this folder exists separately
 
 Every file in `tests/fixtures/` is synthetic — written by hand to look like what
-the bridge produces. They were written in correct ISO-8601. The bar bridge does
-not emit correct ISO-8601. So 40 tests passed for weeks over a path that had
-never carried a real message.
+the bridge produces. They were written in correct ISO-8601. The pre-Phase-3
+bar bridge did not emit correct ISO-8601 (see
+`tests/unit/test_bridge_contract_v1_history.py`). So 40 tests passed for weeks
+over a path that had never carried a real message.
 
 Keeping captured output in its own directory is the guard against that
 recurring. If you find yourself editing a file in here to make a test pass, the
@@ -16,12 +17,22 @@ test is telling you something true and the edit is the mistake.
 
 ## How to capture
 
-1. Attach the bridge to a chart in MetaTrader 5 and let it run long enough to
-   emit the record types you need — a tick, at least one completed bar, and the
-   symbol record on init.
-2. Open the **Experts** tab, right-click, *Save As* → a `.log` file.
-3. Extract the JSON lines. Each emitted record is a single line beginning `{`
-   and ending `}`:
+Since Phase 3, VO_Bridge.mq5 writes its own durable JSONL files under the
+terminal's `MQL5\Files\VectorOdyssey\` folder (`<symbol>_ticks.jsonl`,
+`<symbol>_bars.jsonl`, `<symbol>_meta.jsonl` — the latter holding both the
+symbol and source_capabilities records). That is the preferred capture
+source now: copy the file directly, no Experts-tab extraction needed.
+
+1. Attach VO_Bridge.mq5 to a chart and let it run long enough to emit the
+   record types you need — ticks, at least one completed bar, and the
+   startup symbol / source_capabilities records.
+2. Find the file under the terminal's data folder (File → Open Data Folder
+   → `MQL5\Files\VectorOdyssey\`) and copy the `.jsonl` file(s) you need
+   straight into this directory.
+
+If you are still capturing from an older single-purpose bridge or from the
+Experts tab (e.g. VO_BrokerTimeProbe.mq5, which only ever prints), extract
+JSON lines from a saved log the old way instead:
 
    ```powershell
    Select-String -Path .\experts.log -Pattern '^\{.*\}$' |
@@ -29,13 +40,13 @@ test is telling you something true and the edit is the mistake.
        Set-Content -Encoding utf8 .\tests\fixtures\golden\<name>.jsonl
    ```
 
-4. Name the file for what it contains and where it came from:
+3. Name the file for what it contains and where it came from:
 
    ```
    <symbol>_<timeframe>_<yyyymmdd>.jsonl        us100n_m1_20260910.jsonl
    ```
 
-5. Commit it. Captured data is small, and it is the only evidence of what the
+4. Commit it. Captured data is small, and it is the only evidence of what the
    broker actually sent on that day.
 
 ## Provenance
