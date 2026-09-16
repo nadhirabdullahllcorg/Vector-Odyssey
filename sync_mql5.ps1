@@ -8,5 +8,6 @@ Write-Host "Target: $mt5"
 Copy-Item -Path (Join-Path $repo "Experts\*") -Destination (Join-Path $mt5 "Experts") -Recurse -Force
 Copy-Item -Path (Join-Path $repo "Include\*") -Destination (Join-Path $mt5 "Include") -Recurse -Force
 Copy-Item -Path (Join-Path $repo "Scripts\*") -Destination (Join-Path $mt5 "Scripts") -Recurse -Force
+Copy-Item -Path (Join-Path $repo "Indicators\*") -Destination (Join-Path $mt5 "Indicators") -Recurse -Force
 
 Write-Host "Synchronization complete."
