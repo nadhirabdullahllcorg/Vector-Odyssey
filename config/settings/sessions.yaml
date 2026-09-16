@@ -1,0 +1,21 @@
+# config/settings/sessions.yaml        versioned; changing it bumps the version
+#
+# Per-instrument session model (architecture/vo-time-engine.md §4). RTH is a
+# property of the instrument, not of the world - a CFD, its underlying
+# index and a futures contract on "the same" market each have a different
+# session structure, so this lives in config, never as constants in code.
+#
+# US100.n's windows below are the doc's own worked example, used as given.
+version: 1
+
+instruments:
+  US100.n:
+    timezone: America/New_York
+    trading_day_opens: "18:00"        # previous calendar day
+    sessions:
+      ASIA:      { start: "18:00", end: "03:00" }
+      LONDON:    { start: "03:00", end: "09:30" }
+      NY_AM:     { start: "09:30", end: "12:00" }
+      NY_PM:     { start: "12:00", end: "16:00" }
+    rth:         { start: "09:30", end: "16:00" }
+    settlement:  "16:15"

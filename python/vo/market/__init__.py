@@ -9,6 +9,7 @@ from .mapping import (
     record_to_domain,
     resolve_instrument_id,
 )
+from .provenance import Provenance
 from .records import (
     BarRecord,
     BarRecordV2,
@@ -50,6 +51,7 @@ __all__ = [
     "Direction",
     "InstrumentId",
     "MappingResult",
+    "Provenance",
     "QuarantinedBar",
     "QuarantinedRecord",
     "Separation",

@@ -11,18 +11,22 @@ identity, closing C4 alongside Phase 4's E.5), `timestamp` is renamed to
 exist so the candle layer and future coverage checks (C7) have somewhere to
 read from.
 
-Two fields the spec describes are deliberately NOT here yet:
+One field the spec describes is deliberately NOT here, permanently, not
+just for now:
 
-  `temporal: Optional[TimeContext]` — `vo.time.TimeContext` does not exist
-  until Phase 6, and `vo.market` (layer 1) may not import `vo.time`
-  (layer 2, see tests/unit/test_architecture.py's layering test) even for
-  an Optional field. Phase 6 adds it when there is something real to attach.
+  `temporal: Optional[TimeContext]` — `vo.time.TimeContext` (Phase 6) is a
+  layer-2 type, and `vo.market` (layer 1) may not import `vo.time` (see
+  tests/unit/test_architecture.py's layering test) even for an Optional
+  field on a dataclass. Phase 6 attaches temporal context by composition
+  instead (see vo.time.context.TemporalBar) rather than by extending Bar —
+  the same "wrap it in a view, don't mutate the record" pattern Candle
+  already established for geometry in Phase 5.
 
-  `provenance: Provenance` — the spec's own field list ("raw broker ts,
-  offset, tz, schema_version") is half unresolvable before the Time Engine
-  exists (no offset/tz is known yet). Inventing a half-empty value type now
-  just means redesigning it again in Phase 6; deferred until it can be
-  built honestly.
+`provenance: Provenance | None = None` (below) is Phase 6's doing: it is a
+plain vo.market value type (see provenance.py) with no dependency on
+vo.time, so Bar can hold it without an upward import. vo.time populates it
+once it has resolved a real UTC offset; until then (schema v1, or an
+unresolved v2 record) it stays None.
 
 `source_tick_start`/`source_tick_end`/`captured_tick_count` are always None
 today for the same reason: no wire record — v1 or v2 — carries a per-bar
@@ -45,6 +49,7 @@ from datetime import datetime
 from enum import Enum, auto
 
 from .identity import InstrumentId
+from .provenance import Provenance
 from .timeframe import Timeframe
 
 
@@ -124,6 +129,7 @@ class Bar:
     captured_tick_count: int | None = None
     quality: DataQuality = DataQuality.VALID
     quality_reason: str | None = None
+    provenance: Provenance | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, InstrumentId):
