@@ -3,9 +3,11 @@
 //|                                                                  |
 //| Draws Phase 7's reference levels (architecture/vo-time-engine.md |
 //| S6) directly on an MT5 chart: previous day/week/month O/H/L/C,   |
-//| the four session opens (trading-day/week/month/RTH), and         |
-//| settlement - one dated object set per completed period, kept for |
-//| a rolling calendar-day window ("ICT-style PD arrays").           |
+//| the four session opens (trading-day/week/month/RTH), settlement, |
+//| and the Opening Range Gap (ORG, [VO-D]: prior settlement <->     |
+//| today's RTH open, high/low/equilibrium) - one dated object set   |
+//| per completed period, kept for a rolling calendar-day window     |
+//| ("ICT-style PD arrays").                                         |
 //|                                                                  |
 //| SCOPE - READ BEFORE CHANGING ANYTHING HERE:                      |
 //| This is a Custom INDICATOR, not an Expert Advisor, and that is a |
@@ -110,6 +112,7 @@ input bool   InpDrawPreviousWeekLevels  = true;
 input bool   InpDrawPreviousMonthLevels = true;
 input bool   InpDrawSessionOpens        = true;
 input bool   InpDrawSettlement          = true;
+input bool   InpDrawOpeningRangeGap      = true;  // ORG: prior settlement <-> today's RTH open
 
 input group "=== Style ==="
 input color  InpColorDay        = clrDodgerBlue;
@@ -117,6 +120,7 @@ input color  InpColorWeek       = clrOrange;
 input color  InpColorMonth      = clrMagenta;
 input color  InpColorSessionOpen= clrSilver;
 input color  InpColorSettlement = clrGold;
+input color  InpColorORG        = clrAqua;
 input ENUM_LINE_STYLE InpLineStyle = STYLE_DOT;
 input int    InpLineWidth = 1;
 input int    InpFontSize  = 7;
@@ -366,6 +370,52 @@ void VO_DrawDailyLevels(const MqlRates &rates[], const datetime &bar_ny_naive[],
       if(settle_idx >= 0)
          VO_DrawLevel(VO_REF_PREFIX + "|D|" + date_str + "|settlement", rates[settle_idx].time, rates[settle_idx].close,
                       "Settlement " + date_str, InpColorSettlement);
+     }
+
+   // ORG (Opening Range Gap, [VO-D]): the previous trading day's settlement
+   // (its 16:14 close) against THIS trading day's RTH open (09:30). The open
+   // is the gap's high (gap up) or low (gap down); equilibrium is the 50%
+   // midpoint. Native reimplementation of vo.market.opening_range /
+   // vo.time.levels.ReferenceLevelEngine.opening_range_gap (same one-way-wire
+   // reasoning as the rest of this file). Needs a previous day (d>=1).
+   if(InpDrawOpeningRangeGap && d >= 1)
+     {
+      // prior settlement = close of the last bar before 16:14 on day d-1.
+      const datetime prior_settle_ny = VO_InstantForTradingDay(day_key[d - 1], g_settlement_min, g_trading_day_opens_min);
+      int prior_settle_idx = -1;
+      for(int i = day_start[d - 1]; i <= day_end[d - 1]; i++)
+        {
+         if(bar_ny_naive[i] >= prior_settle_ny) break;
+         prior_settle_idx = i;
+        }
+      // today's RTH open = open of the first bar at/after 09:30 on day d.
+      const datetime rth_ny = VO_InstantForTradingDay(day_key[d], g_rth_start_min, g_trading_day_opens_min);
+      int rth_idx = -1;
+      for(int i = day_start[d]; i <= day_end[d]; i++)
+        {
+         if(bar_ny_naive[i] >= rth_ny) { rth_idx = i; break; }
+        }
+      if(prior_settle_idx >= 0 && rth_idx >= 0)
+        {
+         const double settle_price = rates[prior_settle_idx].close;
+         const double open_price   = rates[rth_idx].open;
+         const double org_high = MathMax(open_price, settle_price);
+         const double org_low  = MathMin(open_price, settle_price);
+         const double org_eq   = (org_high + org_low) / 2.0;
+         const datetime anchor = rates[rth_idx].time;  // ORG is defined from the RTH open onward
+
+         const string open_side = (open_price > settle_price) ? " (open)"
+                                : (open_price < settle_price) ? ""
+                                : " (flat)";
+         const string low_side  = (open_price < settle_price) ? " (open)" : "";
+
+         VO_DrawLevel(VO_REF_PREFIX + "|D|" + date_str + "|org_high", anchor, org_high,
+                      "ORG H " + date_str + open_side, InpColorORG);
+         VO_DrawLevel(VO_REF_PREFIX + "|D|" + date_str + "|org_low", anchor, org_low,
+                      "ORG L " + date_str + low_side, InpColorORG);
+         VO_DrawLevel(VO_REF_PREFIX + "|D|" + date_str + "|org_eq", anchor, org_eq,
+                      "ORG EQ " + date_str, InpColorORG);
+        }
      }
   }
 
