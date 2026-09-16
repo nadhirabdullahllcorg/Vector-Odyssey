@@ -53,6 +53,7 @@ from vo.market.levels import (
     PeriodOHLC,
     SessionOpens,
 )
+from vo.market.opening_range import OpeningRangeGap
 from vo.market.sequence import BarSequence
 from vo.time.engine import VOTimeEngine
 
@@ -280,6 +281,25 @@ class ReferenceLevelEngine:
             return None
         return AnchorComparison(
             trading_day=trading_day, first=opens.rth_open, second=settlement_price
+        )
+
+    def opening_range_gap(self, trading_day: date) -> OpeningRangeGap | None:
+        """The opening range gap (ORG, [VO-D]) for `trading_day`: the
+        previous trading day's settlement (16:14 close) against this
+        trading day's RTH open (09:30). None when there is no earlier
+        trading day observed, or when either anchor is missing. See
+        vo.market.opening_range."""
+        earlier = self._earlier_groups(trading_day)
+        if not earlier:
+            return None
+        prior_settlement = self.settlement(earlier[-1].trading_day)
+        opens = self.session_opens(trading_day)
+        if prior_settlement is None or opens is None or opens.rth_open is None:
+            return None
+        return OpeningRangeGap(
+            trading_day=trading_day,
+            session_open=opens.rth_open,
+            prior_settlement=prior_settlement,
         )
 
     # ── boundary pairs ───────────────────────────────────────────────
