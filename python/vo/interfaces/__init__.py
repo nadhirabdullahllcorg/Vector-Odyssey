@@ -5,6 +5,11 @@ This package depends on nothing else in ``vo``. Everything else may depend on
 it. That is what makes it the boundary.
 """
 
+from vo.interfaces.canonical import (
+    AppendOnlyLog,
+    CanonicalRecord,
+    CanonicalRecordError,
+)
 from vo.interfaces.concepts import (
     REGISTRY,
     ConceptError,
@@ -19,6 +24,9 @@ from vo.interfaces.strategy import IVOStrategy, StrategyContext
 
 __all__ = [
     "REGISTRY",
+    "AppendOnlyLog",
+    "CanonicalRecord",
+    "CanonicalRecordError",
     "ConceptError",
     "ConceptRecord",
     "ConceptRegistry",

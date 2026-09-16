@@ -361,7 +361,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "module",
-    ["vo", "vo.interfaces", "vo.market"],
+    ["vo", "vo.interfaces", "vo.market", "vo.month01", "vo.month01.ontology"],
 )
 def test_public_packages_import_cleanly(module: str) -> None:
     __import__(module)
