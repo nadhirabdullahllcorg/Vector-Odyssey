@@ -103,6 +103,8 @@ def _swing(*, swing_type: SwingType, price: float) -> SwingPoint:
         confirmed_at_bar_id="confirm",
         reversal_ticks=1,
         atr_ticks_at_pivot=1,
+        reversal_extreme_price=price - 1.0,
+        reversal_extreme_bar_id="extreme",
     )
 
 

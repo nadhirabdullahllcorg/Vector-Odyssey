@@ -96,6 +96,8 @@ def test_structurally_confirmed_and_atr_significant_reversal_is_confirmed():
     assert swing.price == 110
     assert swing.reversal_ticks == 13
     assert swing.atr_ticks_at_pivot == 11
+    assert swing.reversal_extreme_price == 97
+    assert swing.reversal_extreme_bar_id == bars[3].bar_id  # first tied low wins, deterministically
     assert swing.pivot_bar_id == bars[2].bar_id
     assert swing.confirmed_at_bar_id == bars[4].bar_id
     assert swing.observed_at == bars[2].open_time_utc
@@ -194,6 +196,8 @@ def _kwargs(**overrides):
         confirmed_at_bar_id="confirm",
         reversal_ticks=13,
         atr_ticks_at_pivot=11,
+        reversal_extreme_price=97.0,
+        reversal_extreme_bar_id="extreme",
     )
     base.update(overrides)
     return base
@@ -202,6 +206,13 @@ def _kwargs(**overrides):
 def test_confirmed_swing_point_requires_reversal_and_atr():
     with pytest.raises(CanonicalRecordError):
         SwingPoint(**_kwargs(reversal_ticks=None))
+
+
+def test_confirmed_swing_point_requires_reversal_extreme_price_and_bar_id():
+    with pytest.raises(CanonicalRecordError):
+        SwingPoint(**_kwargs(reversal_extreme_price=None))
+    with pytest.raises(CanonicalRecordError):
+        SwingPoint(**_kwargs(reversal_extreme_bar_id=None))
 
 
 def test_broken_swing_point_requires_supersedes():

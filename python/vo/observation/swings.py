@@ -155,6 +155,18 @@ class SwingPoint(CanonicalRecord):
     atr_ticks_at_pivot: int | None = None
     """The ATR value (in ticks) the CONFIRMED decision was measured
     against, kept for traceability. None on a BROKEN record."""
+    reversal_extreme_price: float | None = None
+    """The price that produced `reversal_ticks` -- the lowest low
+    (SwingType.HIGH) or highest high (SwingType.LOW) across the K-bar
+    confirming window. None on a BROKEN record. Recorded rather than
+    left for a consumer to re-derive, so a chart-drawing tool (or
+    anything else wanting to show the measured reversal) has a single
+    source of truth instead of risking a second implementation quietly
+    disagreeing with this one -- the same divergence risk Section 7
+    names for the EA's own brain."""
+    reversal_extreme_bar_id: str | None = None
+    """Bar.bar_id of the bar that produced `reversal_extreme_price`.
+    None on a BROKEN record."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -166,10 +178,16 @@ class SwingPoint(CanonicalRecord):
             )
 
         if self.status is SwingStatus.CONFIRMED:
-            if self.reversal_ticks is None or self.atr_ticks_at_pivot is None:
+            if (
+                self.reversal_ticks is None
+                or self.atr_ticks_at_pivot is None
+                or self.reversal_extreme_price is None
+                or self.reversal_extreme_bar_id is None
+            ):
                 raise CanonicalRecordError(
-                    "a CONFIRMED SwingPoint requires reversal_ticks and "
-                    "atr_ticks_at_pivot"
+                    "a CONFIRMED SwingPoint requires reversal_ticks, "
+                    "atr_ticks_at_pivot, reversal_extreme_price and "
+                    "reversal_extreme_bar_id"
                 )
         elif self.supersedes is None:
             raise CanonicalRecordError("a BROKEN SwingPoint must supersede a CONFIRMED one")
@@ -185,6 +203,8 @@ def _confirmed_swing(
     confirming_bar: Bar,
     reversal_ticks: int,
     atr_ticks_at_pivot: int,
+    reversal_extreme_price: float,
+    reversal_extreme_bar_id: str,
     methodology_version: int,
 ) -> SwingPoint:
     price = pivot.high if swing_type is SwingType.HIGH else pivot.low
@@ -206,6 +226,8 @@ def _confirmed_swing(
         confirmed_at_bar_id=confirming_bar.bar_id,
         reversal_ticks=reversal_ticks,
         atr_ticks_at_pivot=atr_ticks_at_pivot,
+        reversal_extreme_price=reversal_extreme_price,
+        reversal_extreme_bar_id=reversal_extreme_bar_id,
     )
 
 
@@ -383,14 +405,17 @@ class SwingEngine:
         after_pivot = bars[pivot_index + 1 : pivot_index + self._k + 1]
 
         if swing_type is SwingType.HIGH:
+            extreme_bar = min(after_pivot, key=lambda bar: bar.low)
             reversal_ticks = to_ticks(pivot.high, self._tick_size) - to_ticks(
-                min(bar.low for bar in after_pivot), self._tick_size
+                extreme_bar.low, self._tick_size
             )
+            extreme_price = extreme_bar.low
         else:
-            reversal_ticks = (
-                to_ticks(max(bar.high for bar in after_pivot), self._tick_size)
-                - to_ticks(pivot.low, self._tick_size)
+            extreme_bar = max(after_pivot, key=lambda bar: bar.high)
+            reversal_ticks = to_ticks(extreme_bar.high, self._tick_size) - to_ticks(
+                pivot.low, self._tick_size
             )
+            extreme_price = extreme_bar.high
 
         if reversal_ticks < self._atr_multiplier * atr:
             return []
@@ -405,6 +430,8 @@ class SwingEngine:
                 confirming_bar=confirming_bar,
                 reversal_ticks=reversal_ticks,
                 atr_ticks_at_pivot=atr,
+                reversal_extreme_price=extreme_price,
+                reversal_extreme_bar_id=extreme_bar.bar_id,
                 methodology_version=self._methodology_version,
             )
         ]
