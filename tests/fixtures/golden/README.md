@@ -53,9 +53,15 @@ JSON lines from a saved log the old way instead:
 
 Record what produced each file, so a surprising value can be traced later.
 
-| File | Symbol | Broker / server | Bridge version | Captured (UTC) |
+| File | Symbol | Broker / server | Bridge version | Captured (server time) |
 |---|---|---|---|---|
-| _(none yet)_ | | | | |
+| `us100n_ticks_20260915.jsonl` | US100.n | 1xTrade-Server | VO_Bridge.mq5 (commit `48923fb`) | 2026-09-15, startup CopyTicksRange backfill, 60 min window, 8523 ticks |
+| `us100n_m1_bars_20260915.jsonl` | US100.n | 1xTrade-Server | VO_Bridge.mq5 (commit `48923fb`) | 2026-09-15/16, startup CopyRates backfill, 500 bars, PERIOD_CURRENT |
+| `us100n_meta_20260915.jsonl` | US100.n | 1xTrade-Server | VO_Bridge.mq5 (commit `48923fb`) | 2026-09-15, one symbol record + one source_capabilities record from OnInit |
+
+**First real evidence on `real_volume`:** `source_capabilities` for US100.n on 1xTrade-Server reports `real_volume_available: false`, `tick_level_available: true` — observed by VO_Bridge.mq5's startup scan, not assumed. Every bar in the capture reports `real_volume: 0`, consistent with that finding.
+
+Verified against `vo.market.schema.validate_wire_dict` and `vo.market.deserialization.json_to_record` (the real code, not a read-through): 9,026 records, 0 schema problems, 0 deserialize failures, 0 seq gaps/duplicates in either stream, 0 OHLC geometry violations, 0 crossed-market ticks.
 
 ## What consumes this
 

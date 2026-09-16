@@ -1,0 +1,2 @@
+{"record_type":"symbol","schema_version":2,"broker_symbol":"US100.n","description":"E-mini Nasdaq 100/spot","digits":2,"point":0.0100000000,"tick_size":0.0100000000,"tick_value":0.0100000000,"contract_size":1.0000000000,"platform":"MT5","broker_server":"1xTrade-Server"}
+{"record_type":"source_capabilities","schema_version":2,"platform":"MT5","broker_server":"1xTrade-Server","broker_symbol":"US100.n","real_volume_available":false,"tick_level_available":true}
