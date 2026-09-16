@@ -13,12 +13,13 @@ Two audit findings meet here (architecture/vo-architecture-audit.md):
          domain objects and quarantined (record, reason) pairs instead of
          one bad record aborting the whole run.
 
-Scope, deliberately narrow (see architecture/vo-candle-layer.md's own
-Phase 4 vs Phase 5 split): this is the mapper and the quarantine boundary,
-not the richer future Bar shape (bar_id, provenance, quality, temporal
-context) — that is Phase 5. It also does not attempt UTC time resolution
-for schema v2 records; see UnresolvedServerTimeError below for why that is
-a deliberate refusal, not an oversight.
+Scope, deliberately narrow at the time this module was first written (see
+architecture/vo-candle-layer.md's own Phase 4 vs Phase 5 split): this is
+the mapper and the quarantine boundary. The richer Bar shape (bar_id,
+quality, timeframe/instrument_id typing) landed in Phase 5 — see bar.py.
+This module does not attempt UTC time resolution for schema v2 records;
+see UnresolvedServerTimeError below for why that is a deliberate refusal,
+not an oversight — that stays true regardless of phase.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from .records import (
 )
 from .symbol import Symbol
 from .tick import Tick
+from .timeframe import Timeframe
 
 __all__ = [
     "InstrumentId",
@@ -186,16 +188,18 @@ def record_to_domain(record: AnyRecord) -> Tick | Bar | Symbol:
         )
 
     if isinstance(record, BarRecord):
+        # v1 has no spread/source_feed at all - Bar's defaults (None /
+        # TickFeed.NONE) are the honest answer, not a guess.
         return Bar(
-            timestamp=record.timestamp,
+            instrument_id=instrument_id,
+            timeframe=Timeframe.from_mt5(record.timeframe),
+            open_time_utc=record.timestamp,
             open=record.open,
             high=record.high,
             low=record.low,
             close=record.close,
             tick_volume=record.tick_volume,
             real_volume=record.real_volume,
-            timeframe=record.timeframe,
-            instrument_id=instrument_id,
         )
 
     if isinstance(record, BarRecordV2):
