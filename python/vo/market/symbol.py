@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from .identity import InstrumentId
+
 
 @dataclass(frozen=True)
 class Symbol:
@@ -18,6 +20,7 @@ class Symbol:
     tick_value: float
     contract_size: float
     source: str
+    instrument_id: InstrumentId | None = None
 
     def __post_init__(self) -> None:
         if not self.source.strip():

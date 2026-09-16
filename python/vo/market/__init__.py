@@ -1,4 +1,13 @@
 from .bar import Bar
+from .identity import InstrumentId
+from .mapping import (
+    MappingResult,
+    QuarantinedRecord,
+    UnresolvedServerTimeError,
+    map_records,
+    record_to_domain,
+    resolve_instrument_id,
+)
 from .records import (
     BarRecord,
     BarRecordV2,
@@ -15,6 +24,9 @@ __all__ = [
     "Bar",
     "BarRecord",
     "BarRecordV2",
+    "InstrumentId",
+    "MappingResult",
+    "QuarantinedRecord",
     "SourceCapabilitiesRecord",
     "Symbol",
     "SymbolRecord",
@@ -22,4 +34,8 @@ __all__ = [
     "Tick",
     "TickRecord",
     "TickRecordV2",
+    "UnresolvedServerTimeError",
+    "map_records",
+    "record_to_domain",
+    "resolve_instrument_id",
 ]

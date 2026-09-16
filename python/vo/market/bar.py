@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from .identity import InstrumentId
+
 
 @dataclass(frozen=True)
 class Bar:
@@ -19,6 +21,7 @@ class Bar:
     tick_volume: int
     real_volume: int
     timeframe: str
+    instrument_id: InstrumentId | None = None
 
     def __post_init__(self) -> None:
         if self.timestamp.tzinfo is None:

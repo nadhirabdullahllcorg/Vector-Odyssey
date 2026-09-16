@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
+from .identity import InstrumentId
+
 
 @dataclass(frozen=True)
 class Tick:
@@ -17,6 +19,7 @@ class Tick:
     last: float | None
     volume: float
     source: str
+    instrument_id: InstrumentId | None = None
 
     def __post_init__(self) -> None:
         if self.volume < 0:
