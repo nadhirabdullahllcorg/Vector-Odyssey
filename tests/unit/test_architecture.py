@@ -378,6 +378,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.observation.atr",
         "vo.observation.swing_config",
         "vo.observation.swings",
+        "vo.observation.swing_reference",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:
