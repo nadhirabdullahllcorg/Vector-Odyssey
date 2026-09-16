@@ -9,6 +9,11 @@ description = "Vector Odyssey research and trading system"
 requires-python = ">=3.13"
 dependencies = [
     "pyyaml>=6",
+    # Windows ships no system IANA timezone database, so zoneinfo
+    # (used by vo.time.brokers for America/New_York) needs this package
+    # there. Linux/Mac have the system copy, which is why tests never
+    # caught it -- but VO_EA runs on the user's Windows terminal.
+    "tzdata; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]

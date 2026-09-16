@@ -70,6 +70,15 @@ int g_meta_sink = INVALID_HANDLE;
 
 datetime g_last_bar_time = 0;
 
+// Effective bar timeframe. InpBarTimeframe defaults to PERIOD_CURRENT,
+// whose EnumToString() is the literal "PERIOD_CURRENT" -- not a real,
+// fixed timeframe. The Python pipeline (Timeframe.from_mt5) correctly
+// refuses that string and quarantines every such bar. Resolving
+// PERIOD_CURRENT to the chart's actual period here (in OnInit) means the
+// emitted timeframe is always a concrete, mappable value like
+// "PERIOD_M1", whatever the input is left at.
+ENUM_TIMEFRAMES g_bar_tf = PERIOD_CURRENT;
+
 //+------------------------------------------------------------------+
 void EmitLine(int &sink, const string line)
 {
@@ -117,6 +126,7 @@ int OnInit()
    g_platform      = "MT5";
    g_broker_server = AccountInfoString(ACCOUNT_SERVER);
    g_broker_symbol = _Symbol;
+   g_bar_tf        = (InpBarTimeframe == PERIOD_CURRENT) ? Period() : InpBarTimeframe;
 
    g_tick_sink = VO_OpenSink(InpOutputSubdir, g_broker_symbol + "_ticks.jsonl");
    g_bar_sink  = VO_OpenSink(InpOutputSubdir, g_broker_symbol + "_bars.jsonl");
@@ -124,7 +134,7 @@ int OnInit()
 
    Print("VO BRIDGE STARTED. symbol=", g_broker_symbol,
          " server=", g_broker_server,
-         " bar_timeframe=", EnumToString(InpBarTimeframe));
+         " bar_timeframe=", EnumToString(g_bar_tf));
 
    // ── symbol metadata, once ──────────────────────────────────────
    string symbol_record = VO_BuildSymbolRecord(
@@ -170,7 +180,7 @@ void BackfillBars()
    ArraySetAsSeries(rates, true);
 
    // Shift 1 = most recently completed bar; skip shift 0, the forming one.
-   int copied = CopyRates(_Symbol, InpBarTimeframe, 1, InpBarBackfillCount, rates);
+   int copied = CopyRates(_Symbol, g_bar_tf, 1, InpBarBackfillCount, rates);
 
    if(copied <= 0)
    {
@@ -185,7 +195,7 @@ void BackfillBars()
       string record = VO_BuildBarRecord(
          rates[i].time, rates[i].open, rates[i].high, rates[i].low, rates[i].close,
          (int)_Digits, rates[i].tick_volume, rates[i].real_volume, rates[i].spread,
-         EnumToString(InpBarTimeframe), ++g_bar_seq, "history",
+         EnumToString(g_bar_tf), ++g_bar_seq, "history",
          g_platform, g_broker_server, g_broker_symbol
       );
       EmitLine(g_bar_sink, record);
@@ -259,7 +269,7 @@ void EmitBarIfClosed()
    ArraySetAsSeries(rates, true);
 
    // Shift 1 = most recently completed bar.
-   int copied = CopyRates(_Symbol, InpBarTimeframe, 1, 1, rates);
+   int copied = CopyRates(_Symbol, g_bar_tf, 1, 1, rates);
 
    if(copied != 1)
    {
@@ -273,7 +283,7 @@ void EmitBarIfClosed()
    string bar_record = VO_BuildBarRecord(
       rates[0].time, rates[0].open, rates[0].high, rates[0].low, rates[0].close,
       (int)_Digits, rates[0].tick_volume, rates[0].real_volume, rates[0].spread,
-      EnumToString(InpBarTimeframe), ++g_bar_seq, "live",
+      EnumToString(g_bar_tf), ++g_bar_seq, "live",
       g_platform, g_broker_server, g_broker_symbol
    );
    EmitLine(g_bar_sink, bar_record);
