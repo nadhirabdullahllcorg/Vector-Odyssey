@@ -10,6 +10,7 @@ from .brokers import (
 from .calendars import trading_day_of
 from .context import SessionTransition, TemporalBar, TemporalStatus, TimeContext, TimeProvenance
 from .engine import ITimeEngine, UnknownInstrumentError, VOTimeEngine
+from .levels import ReferenceLevelEngine
 from .mapping import resolve_record
 from .provisional import ProvisionalTimeEngine
 from .sessions import (
@@ -28,6 +29,7 @@ __all__ = [
     "BrokerResolution",
     "ITimeEngine",
     "ProvisionalTimeEngine",
+    "ReferenceLevelEngine",
     "SessionConfig",
     "SessionConfigError",
     "SessionTransition",

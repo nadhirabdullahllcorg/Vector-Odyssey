@@ -5,7 +5,10 @@
 # index and a futures contract on "the same" market each have a different
 # session structure, so this lives in config, never as constants in code.
 #
-# US100.n's windows below are the doc's own worked example, used as given.
+# US100.n's windows below are the doc's own worked example, with one
+# correction: settlement is 16:14 ET, not the doc's illustrative 16:15
+# (confirmed directly against the actual settlement/close convention -
+# Phase 7).
 version: 1
 
 instruments:
@@ -18,4 +21,4 @@ instruments:
       NY_AM:     { start: "09:30", end: "12:00" }
       NY_PM:     { start: "12:00", end: "16:00" }
     rth:         { start: "09:30", end: "16:00" }
-    settlement:  "16:15"
+    settlement:  "16:14"

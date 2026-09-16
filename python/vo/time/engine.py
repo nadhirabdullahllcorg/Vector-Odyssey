@@ -68,6 +68,12 @@ class VOTimeEngine:
             )
         return config
 
+    def config_for(self, instrument: InstrumentId) -> SessionConfig:
+        """Public accessor for the resolved SessionConfig - vo.time.levels
+        (Phase 7) needs the raw RTH/settlement time-of-day and timezone
+        directly, beyond what the five ITimeEngine methods expose."""
+        return self._config_for(instrument)
+
     def context_for(self, utc: datetime, instrument: InstrumentId) -> TimeContext:
         if utc.tzinfo is None:
             raise ValueError("utc must be timezone-aware")
