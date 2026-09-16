@@ -26,6 +26,15 @@ dashboard = [
     "uvicorn[standard]>=0.30",
 ]
 
+# Only needed on the Windows machine running the MT5 terminal, for the
+# Phase 12 read adapter (vo.market.mt5) -- the sole MetaTrader5 importer.
+# Kept optional and Windows-marked so the core/test environment (Linux CI)
+# never needs the package or a terminal; the mappers are tested with
+# fabricated inputs, and vo.market.mt5 imports the package lazily.
+mt5 = [
+    "MetaTrader5>=5.0; platform_system == 'Windows'",
+]
+
 [tool.setuptools.packages.find]
 where = ["python"]
 
@@ -45,3 +54,10 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.13"
 files = ["python/vo"]
 strict = true
+
+# MetaTrader5 is an optional, Windows-only, untyped dependency; the one
+# module that imports it (vo.market.mt5) does so lazily. mypy runs in the
+# core/CI env where it is not installed and ships no stubs.
+[[tool.mypy.overrides]]
+module = "MetaTrader5"
+ignore_missing_imports = true
