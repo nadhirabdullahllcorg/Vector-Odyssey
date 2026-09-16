@@ -270,3 +270,18 @@ class MT5ReadClient:
         if raw is None:
             return ()
         return tuple(map_order(o, broker_server=server) for o in raw)
+
+    def symbols(self, contains: str | None = None) -> tuple[str, ...]:  # pragma: no cover
+        """The broker symbol NAMES this terminal offers, optionally filtered
+        to those containing `contains` (case-insensitive). A read-only
+        lookup helper -- names only, no mapping -- for finding the exact
+        spelling of an instrument (broker symbol names vary: US100.n,
+        USTEC, NAS100, ...)."""
+        raw = _mt5().symbols_get()
+        if raw is None:
+            return ()
+        names = tuple(str(s.name) for s in raw)
+        if contains:
+            needle = contains.lower()
+            names = tuple(n for n in names if needle in n.lower())
+        return names

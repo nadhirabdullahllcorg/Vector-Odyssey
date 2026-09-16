@@ -56,6 +56,17 @@ def main() -> int:
             )
         except MT5Error as exc:
             print(f"SYMBOL {symbol}: unavailable ({exc})")
+            candidates: set[str] = set()
+            for pat in ("100", "NAS", "NDX", "USTEC", "TECH"):
+                candidates.update(client.symbols(pat))
+            if candidates:
+                print("  Nasdaq-like symbol names on this terminal (use one of these):")
+                for name in sorted(candidates):
+                    print(f"    {name}")
+            else:
+                everything = sorted(client.symbols())
+                print(f"  {len(everything)} symbols available; first 25:")
+                print("    " + ", ".join(everything[:25]))
 
         positions = client.positions()
         print(f"OPEN POSITIONS ({len(positions)})")
