@@ -374,6 +374,10 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.core.pipeline",
         "vo.telemetry.publisher",
         "vo.telemetry.ea_runtime",
+        "vo.observation",
+        "vo.observation.atr",
+        "vo.observation.swing_config",
+        "vo.observation.swings",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:

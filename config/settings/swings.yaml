@@ -1,0 +1,28 @@
+# config/settings/swings.yaml        versioned; research starting points
+#
+# Phase 11 (Swing Engine, gate G6). Both `k` (bars required on each side
+# of a candidate pivot for structural/fractal confirmation) and
+# `atr_multiplier` (minimum reversal distance, in multiples of ATR,
+# required across that same confirming window) are independent, separate
+# filters -- neither substitutes for the other. See
+# vo.observation.swings's module docstring for the full algorithm.
+#
+# THE VALUES BELOW ARE NOT A FINISHED ANSWER. They are the starting
+# ranges discussed when this design was agreed: internal atr_multiplier
+# in 0.5-2.0, swing atr_multiplier in 1.0-5.0. Whether these are the
+# right values -- or even whether K and ATR should interact this way at
+# all -- is meant to be settled empirically against historical data, per
+# the explicit instruction that shaped this file: "don't assume those
+# thresholds are correct." Changing a value here does not require
+# re-litigating the algorithm, only bumping `version`.
+version: 1
+
+atr_period: 20  # bars; simple moving average of true range (vo.observation.atr)
+
+levels:
+  internal:
+    k: 2
+    atr_multiplier: 1.0   # mid-range of the discussed 0.5x-2.0x band
+  swing:
+    k: 5
+    atr_multiplier: 3.0   # mid-range of the discussed 1.0x-5.0x band
