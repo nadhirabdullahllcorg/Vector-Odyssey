@@ -1,0 +1,27 @@
+# config/settings/regime.yaml        versioned; research starting points
+#
+# Phase 13 (Basic Regime Engine, gate G6). The regime STATE is decided by
+# market structure (confirmed swings of `tier`); Efficiency Ratio and Hurst
+# are recorded evidence only, never the classifier (per the plan's §5.4-5.6
+# split -- Markov/HMM/Hurst never redefine the four ICT states).
+#
+# THE VALUES BELOW ARE NOT A FINISHED ANSWER -- like config/settings/
+# swings.yaml, they are [VO-D]/[VO-H] starting points, to be validated
+# against historical data. Changing one does not re-litigate the algorithm,
+# only bumps `version`.
+version: 1
+
+# Which swing tier is the structural backbone: SWING (larger) or INTERNAL.
+tier: SWING
+
+efficiency_ratio_period: 10   # bars; Kaufman ER window (vo.observation.efficiency_ratio)
+hurst_period: 20              # bars; structure-function Hurst window (vo.observation.hurst)
+
+# [VO-H] anticipation lean thresholds (only affect the recorded lean on a
+# PULLBACK_UNRESOLVED state, never the state itself). Fibonacci-flavoured
+# depths are a nod, explicitly not asserted correct.
+anticipation:
+  er_trend_threshold: 0.5     # ER at/above this + shallow pullback -> lean RETRACEMENT
+  er_chop_threshold: 0.3      # ER at/below this (or deep pullback) -> lean REVERSAL
+  shallow_pullback_ratio: 0.382
+  deep_pullback_ratio: 0.786

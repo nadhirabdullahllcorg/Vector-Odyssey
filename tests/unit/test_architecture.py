@@ -382,6 +382,10 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.market.opening_range",
         "vo.market.account",
         "vo.market.mt5",
+        "vo.observation.efficiency_ratio",
+        "vo.observation.hurst",
+        "vo.observation.regime",
+        "vo.observation.regime_config",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:
