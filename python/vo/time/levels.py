@@ -26,13 +26,14 @@ measurements (an opening print vs a closing print), not two names for
 the same lookup.
 
 A subtlety worth being explicit about: for an instrument whose trading
-day opens before midnight (US100.n opens 18:00 NY), a trading day's own
-RTH and settlement wall-clock times fall on the *next* calendar date, not
-the trading day's own date — trading_day_of already encodes this (see
-vo.time.calendars), and `_instant_for_trading_day` below asks the Time
-Engine itself which calendar date to use rather than assuming +1 day,
-so this stays correct for any instrument's configuration, not just this
-one's.
+day opens before midnight (US100.n opens 18:00 NY), under the CME
+trade-date convention a trading day's own RTH (09:30) and settlement
+(16:14) fall on the trading day's own calendar date, while the trading
+day's *open* (18:00) falls on the *previous* calendar date —
+trading_day_of encodes this (see vo.time.calendars), and
+`_instant_for_trading_day` below asks the Time Engine itself which
+calendar date to use rather than assuming any fixed offset, so this stays
+correct for any instrument's configuration, not just this one's.
 """
 
 from __future__ import annotations

@@ -25,11 +25,13 @@ _INSTRUMENT = InstrumentId(platform="MT5", broker_server="x", broker_symbol="US1
 
 # One trading day D's four representative bars (sparse - BarSequence only
 # needs strictly-increasing timestamps, not full M1 density, to exercise
-# grouping/aggregation correctly):
-#   day_open        NY (D,      18:00)  -- trading_day_open
-#   rth_open_bar    NY (D + 1,  09:30)  -- rth_open
-#   pre_settlement  NY (D + 1,  16:13)  -- its CLOSE is "settlement" (16:14)
-#   day_end         NY (D + 1,  17:59)  -- last bar before the next rollover
+# grouping/aggregation correctly). CME trade-date convention: the session
+# opening 18:00 ET the PREVIOUS calendar day (D-1) is trading day D, whose
+# RTH open, settlement and end all fall on D's own calendar date:
+#   day_open        NY (D - 1,  18:00)  -- trading_day_open
+#   rth_open_bar    NY (D,      09:30)  -- rth_open
+#   pre_settlement  NY (D,      16:13)  -- its CLOSE is "settlement" (16:14)
+#   day_end         NY (D,      17:59)  -- last bar before the next rollover
 _TRADING_DAYS = [
     date(2026, 6, 26),  # Fri, week 26, June
     date(2026, 6, 29),  # Mon, week 27, June
@@ -63,20 +65,22 @@ def _build_sequence() -> BarSequence:
     bars: list[Bar] = []
     for i, trading_day in enumerate(_TRADING_DAYS):
         base = 100 + i * 10
-        next_day = trading_day + timedelta(days=1)
+        prev_cal = trading_day - timedelta(days=1)
 
+        # day_open: the session opens 18:00 ET the PREVIOUS calendar day.
         bars.append(
             _bar(
-                _ny(trading_day.year, trading_day.month, trading_day.day, 18, 0),
+                _ny(prev_cal.year, prev_cal.month, prev_cal.day, 18, 0),
                 base,
                 base + 1,
                 base - 1,
                 base + 0.5,
             )
         )
+        # rth_open / pre_settlement / day_end all fall on trading_day's own date.
         bars.append(
             _bar(
-                _ny(next_day.year, next_day.month, next_day.day, 9, 30),
+                _ny(trading_day.year, trading_day.month, trading_day.day, 9, 30),
                 base + 2,
                 base + 3,
                 base + 1,
@@ -85,7 +89,7 @@ def _build_sequence() -> BarSequence:
         )
         bars.append(
             _bar(
-                _ny(next_day.year, next_day.month, next_day.day, 16, 13),
+                _ny(trading_day.year, trading_day.month, trading_day.day, 16, 13),
                 base + 3,
                 base + 5,
                 base + 2,
@@ -94,7 +98,7 @@ def _build_sequence() -> BarSequence:
         )
         bars.append(
             _bar(
-                _ny(next_day.year, next_day.month, next_day.day, 17, 59),
+                _ny(trading_day.year, trading_day.month, trading_day.day, 17, 59),
                 base + 4,
                 base + 6,
                 base + 3,
@@ -236,7 +240,7 @@ def test_session_opens_reports_all_four_anchors_correctly():
     assert opens.rth_open is not None
     assert opens.rth_open.price == 132  # base + 2
     assert opens.rth_open.label == "rth_open"
-    assert opens.rth_open.utc_timestamp == _ny(2026, 7, 2, 9, 30)
+    assert opens.rth_open.utc_timestamp == _ny(2026, 7, 1, 9, 30)
 
 
 def test_session_opens_is_none_for_an_unobserved_trading_day():
@@ -253,7 +257,7 @@ def test_settlement_uses_the_closing_price_at_1614_not_the_opening_price():
     assert settlement is not None
     assert settlement.label == "settlement"
     assert settlement.price == 134  # base + 4 == pre_settlement bar's close
-    assert settlement.utc_timestamp == _ny(2026, 7, 2, 16, 13)
+    assert settlement.utc_timestamp == _ny(2026, 7, 1, 16, 13)
 
 
 def test_settlement_is_none_for_an_unobserved_trading_day():
@@ -286,9 +290,9 @@ def test_rth_open_settlement_comparison_marks_rth_open_higher_when_it_is():
     comparison logic is direction-agnostic, not just correct for this
     module's own (settlement > rth_open) dataset shape."""
     bars = [
-        _bar(_ny(2026, 7, 1, 18, 0), 100, 101, 99, 100),
-        _bar(_ny(2026, 7, 2, 9, 30), 150, 151, 149, 150),  # rth_open = 150, high
-        _bar(_ny(2026, 7, 2, 16, 13), 90, 91, 89, 90),  # settlement = 90, low
+        _bar(_ny(2026, 6, 30, 18, 0), 100, 101, 99, 100),  # day_open (prev cal day)
+        _bar(_ny(2026, 7, 1, 9, 30), 150, 151, 149, 150),  # rth_open = 150, high
+        _bar(_ny(2026, 7, 1, 16, 13), 90, 91, 89, 90),  # settlement = 90, low
     ]
     engine = _engine_for(bars)
     comparison = engine.rth_open_settlement_comparison(date(2026, 7, 1))
@@ -302,9 +306,9 @@ def test_rth_open_settlement_comparison_marks_rth_open_higher_when_it_is():
 
 def test_rth_open_settlement_comparison_is_none_not_a_guess_on_an_exact_tie():
     bars = [
-        _bar(_ny(2026, 7, 1, 18, 0), 100, 101, 99, 100),
-        _bar(_ny(2026, 7, 2, 9, 30), 125, 126, 124, 125),  # rth_open = 125
-        _bar(_ny(2026, 7, 2, 16, 13), 124, 126, 123, 125),  # settlement = 125, exact tie
+        _bar(_ny(2026, 6, 30, 18, 0), 100, 101, 99, 100),  # day_open (prev cal day)
+        _bar(_ny(2026, 7, 1, 9, 30), 125, 126, 124, 125),  # rth_open = 125
+        _bar(_ny(2026, 7, 1, 16, 13), 124, 126, 123, 125),  # settlement = 125, exact tie
     ]
     engine = _engine_for(bars)
     comparison = engine.rth_open_settlement_comparison(date(2026, 7, 1))
@@ -318,19 +322,20 @@ def test_rth_open_settlement_comparison_is_none_not_a_guess_on_an_exact_tie():
 
 
 def test_boundary_pairs_preserve_both_raw_prices_across_a_normal_transition():
-    """2026-07-01 (base=130): the observed bars go ASIA (day_open,
-    18:00) -> NY_AM (rth_open, 09:30) -> no configured session (the
-    16:00-18:00 gap, where pre_settlement and day_end both fall). The
-    NY_AM -> None crossing between rth_open and pre_settlement is a
-    normal same-day transition, both raw prices preserved exactly."""
+    """Trading day 2026-07-01 (base=130): its day_open is the prior
+    evening (2026-06-30 18:00, ASIA); its rth_open (2026-07-01 09:30) is
+    NY_AM; its pre_settlement and day_end (2026-07-01 16:13 / 17:59) fall
+    in the 16:00-18:00 gap with no configured session. The NY_AM -> None
+    crossing between rth_open and pre_settlement is a normal same-day
+    transition, both raw prices preserved exactly."""
     engine = _engine()
     pairs = engine.boundary_pairs()
 
     matches = [
         p
         for p in pairs
-        if p.prior_close_at_utc == _ny(2026, 7, 2, 9, 30)
-        and p.next_open_at_utc == _ny(2026, 7, 2, 16, 13)
+        if p.prior_close_at_utc == _ny(2026, 7, 1, 9, 30)
+        and p.next_open_at_utc == _ny(2026, 7, 1, 16, 13)
     ]
 
     assert len(matches) == 1
@@ -342,20 +347,20 @@ def test_boundary_pairs_preserve_both_raw_prices_across_a_normal_transition():
 
 
 def test_boundary_pairs_capture_the_weekend_gap_with_raw_prices_intact():
-    """Trading_day 2026-07-03 (Friday)'s day_end bar sits on its next
-    calendar date, 2026-07-04 (Saturday) at 17:59 NY - the trading day
-    that started 18:00 Friday runs through the small hours and daytime of
-    the next calendar date before rolling over. From there, the very
-    next observed bar is 2026-07-06 (Monday)'s day_open at 18:00 - a
-    real two-calendar-day jump with nothing invented to fill it."""
+    """Trading day 2026-07-03 (Friday)'s day_end bar is at 2026-07-03
+    17:59 NY (its session opened 2026-07-02 18:00). The very next observed
+    bar is trading day 2026-07-06 (Monday)'s day_open at 2026-07-05
+    (Sunday) 18:00 - the session opening Sunday evening is Monday's trading
+    day (CME). A real two-calendar-day weekend jump with nothing invented
+    to fill it."""
     engine = _engine()
     pairs = engine.boundary_pairs()
 
     weekend_pairs = [
         p
         for p in pairs
-        if p.prior_close_at_utc == _ny(2026, 7, 4, 17, 59)
-        and p.next_open_at_utc == _ny(2026, 7, 6, 18, 0)
+        if p.prior_close_at_utc == _ny(2026, 7, 3, 17, 59)
+        and p.next_open_at_utc == _ny(2026, 7, 5, 18, 0)
     ]
 
     assert len(weekend_pairs) == 1

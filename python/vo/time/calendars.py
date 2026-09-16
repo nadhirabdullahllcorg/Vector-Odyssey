@@ -20,12 +20,25 @@ from datetime import date, datetime, time
 
 def trading_day_of(ny_timestamp: datetime, trading_day_opens: time) -> date:
     """
-    The calendar date this instant's trading day is keyed to.
+    The calendar date this instant's trading day is keyed to — the CME
+    "trade date" convention.
 
-    At or after `trading_day_opens` (NY wall clock), the trading day is
-    today's date. Before it, the trading day is still the one that opened
-    yesterday.
+    A CFD/futures session that opens at `trading_day_opens` (e.g. 18:00 ET)
+    is dated to the *next* calendar day: the session opening 18:00 ET on
+    the 16th is trading day the 17th, running through ~17:00 ET on the
+    17th (its settlement/trade date). So:
+
+      - At or after `trading_day_opens` (NY wall clock), the trading day is
+        tomorrow's date (the session that just opened settles tomorrow).
+      - Before it, the trading day is today's date (still inside the
+        session that opened yesterday evening).
+
+    This is why the trading day disagrees with the NY calendar date for
+    exactly the six hours between the open and midnight — matching the
+    intraday RTH open (09:30) and settlement (16:14) falling on the
+    trading day's own calendar date, while the open itself falls on the
+    previous one.
     """
     if ny_timestamp.timetz().replace(tzinfo=None) >= trading_day_opens:
-        return ny_timestamp.date()
-    return date.fromordinal(ny_timestamp.date().toordinal() - 1)
+        return date.fromordinal(ny_timestamp.date().toordinal() + 1)
+    return ny_timestamp.date()

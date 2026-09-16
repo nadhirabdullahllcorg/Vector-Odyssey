@@ -317,8 +317,11 @@ int VO_ParseHHMM(const string hhmm)
 //| trading_day_of, ported from vo.time.calendars: given an NY naive  |
 //| instant and the trading-day-opens threshold (minutes since local  |
 //| midnight), returns the NY-naive MIDNIGHT of the trading day this  |
-//| instant belongs to. Mirrors the Python rule exactly: on/after the |
-//| threshold -> today's calendar date; before it -> yesterday's.     |
+//| instant belongs to. CME trade-date convention, mirroring the      |
+//| Python rule exactly: a session opening at the threshold (18:00 ET)|
+//| is dated to the NEXT calendar day. On/after the threshold ->      |
+//| tomorrow's date (the session that just opened settles tomorrow);  |
+//| before it -> today's date.                                        |
 //+------------------------------------------------------------------+
 datetime VO_TradingDayOf(const datetime ny_naive, const int trading_day_opens_minutes)
   {
@@ -327,6 +330,6 @@ datetime VO_TradingDayOf(const datetime ny_naive, const int trading_day_opens_mi
    const int minutes_of_day = dt.hour * 60 + dt.min;
    const datetime midnight = VO_MakeNaive(dt.year, dt.mon, dt.day);
    if(minutes_of_day >= trading_day_opens_minutes)
-      return midnight;
-   return midnight - 86400;
+      return midnight + 86400;
+   return midnight;
   }

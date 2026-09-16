@@ -374,10 +374,10 @@ void VO_DrawDailyLevels(const MqlRates &rates[], const datetime &bar_ny_naive[],
 //| day `trading_day` specifically - ported from _instant_for_trading_ |
 //| day (vo/time/levels.py): asks whether combining trading_day's own  |
 //| calendar date with the time-of-day still resolves back to          |
-//| trading_day (it does, unless trading_day_opens is itself later     |
-//| than time_of_day - e.g. RTH/settlement fall on trading_day+1 for   |
-//| an 18:00-opening instrument like US100.n) - never assumes a fixed  |
-//| +0/+1 day offset.                                                  |
+//| trading_day (under the CME trade-date convention it does for       |
+//| RTH 09:30 and settlement 16:14, which fall on trading_day's own    |
+//| date; it is the trading-day OPEN 18:00 that falls on trading_day-1)|
+//| - never assumes a fixed +0/+1 day offset.                          |
 //+------------------------------------------------------------------+
 datetime VO_InstantForTradingDay(const datetime trading_day_midnight, const int time_of_day_minutes,
                                   const int trading_day_opens_minutes)
