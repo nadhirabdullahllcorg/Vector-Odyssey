@@ -1,13 +1,7 @@
 from pathlib import Path
 
-
-
 from vo.market import BarRecord
-
 from vo.market.ingestion import read_jsonl
-
-
-
 
 
 def test_read_jsonl_ignores_blank_lines() -> None:

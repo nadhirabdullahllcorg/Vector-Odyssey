@@ -1,12 +1,6 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from vo.market import BarRecord, SymbolRecord, TickRecord
-
-
-from vo.market import TickRecord
-
-
-
 
 
 def test_tick_record_creation():
@@ -29,7 +23,7 @@ def test_tick_record_creation():
 
 def test_bar_record_creation():
     record = BarRecord(
-    timestamp=datetime(2026, 9, 10, 9, 35, 0, tzinfo=timezone.utc),
+    timestamp=datetime(2026, 9, 10, 9, 35, 0, tzinfo=UTC),
     open=29443.74,
     high=29449.86,
     low=29442.10,

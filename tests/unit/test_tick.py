@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -6,7 +6,7 @@ from vo.market import Tick
 
 
 def test_tick_creation():
-    timestamp = datetime(2026, 9, 10, 7, 0, 0, tzinfo=timezone.utc)
+    timestamp = datetime(2026, 9, 10, 7, 0, 0, tzinfo=UTC)
 
     tick = Tick(
     timestamp=timestamp,
@@ -26,7 +26,7 @@ def test_tick_creation():
 def test_tick_rejects_negative_volume():
     with pytest.raises(ValueError):
         Tick(
-            timestamp=datetime(2026, 9, 10, 7, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 9, 10, 7, 0, 0, tzinfo=UTC),
             bid=21432.50,
             ask=21432.75,
             last=21432.50,
@@ -36,7 +36,7 @@ def test_tick_rejects_negative_volume():
 def test_tick_rejects_ask_below_bid():
     with pytest.raises(ValueError):
         Tick(
-            timestamp=datetime(2026, 9, 10, 7, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 9, 10, 7, 0, 0, tzinfo=UTC),
             bid=21432.75,
             ask=21432.50,
             last=21432.50,

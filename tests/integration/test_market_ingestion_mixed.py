@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from vo.market import BarRecord
-
 from vo.market.ingestion import read_jsonl
 
 

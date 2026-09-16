@@ -1,17 +1,9 @@
-from datetime import datetime, timezone
-
-
+from datetime import UTC, datetime
 
 import pytest
 
-
-
 from vo.market import BarRecord, SymbolRecord, TickRecord
-
 from vo.market.deserialization import dict_to_record, json_to_record
-
-
-
 
 
 def test_tick_dict_to_record():
@@ -86,7 +78,7 @@ def test_bar_dict_to_record():
 
     assert isinstance(record, BarRecord)
 
-    assert record.timestamp == datetime(2026, 9, 10, 9, 35, 0, tzinfo=timezone.utc)
+    assert record.timestamp == datetime(2026, 9, 10, 9, 35, 0, tzinfo=UTC)
 
     assert record.close == 29445.86
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from vo.market import BarRecord, SymbolRecord, TickRecord
 from vo.market.serialization import record_to_dict, record_to_json
@@ -25,7 +25,7 @@ def test_tick_record_to_dict():
 
 def test_bar_record_to_dict():
     record = BarRecord(
-        timestamp=datetime(2026, 9, 10, 9, 35, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 9, 10, 9, 35, 0, tzinfo=UTC),
         open=29443.74,
         high=29449.86,
         low=29442.10,

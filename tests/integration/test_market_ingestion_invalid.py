@@ -1,11 +1,6 @@
 import pytest
 
-
-
 from vo.market.ingestion import read_jsonl
-
-
-
 
 
 def test_read_jsonl_rejects_invalid_record(tmp_path) -> None:

@@ -1,13 +1,7 @@
 from pathlib import Path
 
-
-
 from vo.market import SymbolRecord
-
 from vo.market.deserialization import json_to_record
-
-
-
 
 
 def test_mt5_symbol_fixture_deserializes() -> None:

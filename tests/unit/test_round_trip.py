@@ -1,15 +1,8 @@
-from datetime import datetime, timezone
-
-
+from datetime import UTC, datetime
 
 from vo.market import BarRecord, SymbolRecord, TickRecord
-
 from vo.market.deserialization import json_to_record
-
 from vo.market.serialization import record_to_json
-
-
-
 
 
 def test_tick_round_trip():
@@ -44,7 +37,7 @@ def test_bar_round_trip():
 
         timestamp=datetime(
 
-            2026, 9, 10, 9, 35, 0, tzinfo=timezone.utc
+            2026, 9, 10, 9, 35, 0, tzinfo=UTC
 
         ),
 

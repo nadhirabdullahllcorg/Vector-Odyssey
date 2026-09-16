@@ -1,3 +1,5 @@
+import pytest
+
 from vo.market import Symbol
 
 
@@ -20,11 +22,6 @@ def test_symbol_creation():
     assert symbol.tick_size == 0.01
     assert symbol.tick_value == 0.10
     assert symbol.contract_size == 1.0
-
-import pytest
-
-from vo.market import Symbol
-
 
 def test_symbol_rejects_negative_digits():
     with pytest.raises(ValueError):
