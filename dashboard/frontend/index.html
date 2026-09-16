@@ -1,0 +1,209 @@
+<!doctype html>
+<!--
+  Vector Odyssey dashboard -- frontend (scaffold, v0).
+
+  Deliberately plain: one static HTML file, vanilla JS, no build step, no
+  framework. This is the seed you asked to start with, not the destination
+  -- the backend already speaks JSON over REST and a JSON WebSocket, so a
+  later "full web app, modern frontend" (React/Vite or similar) can replace
+  everything in this file without touching dashboard/backend/ at all; the
+  wire contract is the boundary, not this markup.
+
+  Every panel below shows one of exactly two things: a real value that
+  arrived over the WebSocket, or an explicit "no data yet" state. Nothing
+  here is a placeholder number standing in for a real one.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vector Odyssey Dashboard</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #status-badge {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  #status-detail { color: var(--muted); font-size: 12px; }
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  nav button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  nav button[aria-selected="true"] { background: var(--panel); border-color: var(--muted); }
+  main { padding: 16px; max-width: 900px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .empty { color: var(--muted); font-style: italic; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  footer { padding: 16px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vector Odyssey</h1>
+  <span id="status-badge">CONNECTING&hellip;</span>
+  <span id="status-detail"></span>
+</header>
+
+<nav id="tabs">
+  <!-- Tab set per architecture/vo-architecture-audit.md's dashboard layout. -->
+</nav>
+
+<main>
+  <div class="panel" id="panel-body">
+    <p class="empty">Waiting for the first RuntimeState message&hellip;</p>
+  </div>
+</main>
+
+<footer>
+  Scaffold build -- see <code>architecture/vo-phase-plan.md</code> SS10a. This page never shows
+  a value the EA did not actually report.
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var TABS = ["OVERVIEW", "MARKET", "TIME", "REGIME", "STRATEGY", "RISK", "EXECUTION", "HEALTH"];
+  var activeTab = TABS[0];
+  var latestState = null;
+
+  var tabsEl = document.getElementById("tabs");
+  var badgeEl = document.getElementById("status-badge");
+  var detailEl = document.getElementById("status-detail");
+  var bodyEl = document.getElementById("panel-body");
+
+  TABS.forEach(function (name) {
+    var btn = document.createElement("button");
+    btn.textContent = name;
+    btn.setAttribute("aria-selected", name === activeTab ? "true" : "false");
+    btn.addEventListener("click", function () {
+      activeTab = name;
+      Array.prototype.forEach.call(tabsEl.children, function (child) {
+        child.setAttribute("aria-selected", child === btn ? "true" : "false");
+      });
+      render();
+    });
+    tabsEl.appendChild(btn);
+  });
+
+  function badgeColor(connection) {
+    if (connection === "CONNECTED") return "var(--ok)";
+    if (connection === "STALE") return "var(--warn)";
+    return "var(--bad)";
+  }
+
+  function render() {
+    if (!latestState) {
+      bodyEl.innerHTML = '<p class="empty">Waiting for the first RuntimeState message&hellip;</p>';
+      return;
+    }
+
+    badgeEl.textContent = latestState.connection;
+    badgeEl.style.background = badgeColor(latestState.connection);
+    badgeEl.style.color = "#0d1117";
+    detailEl.textContent = latestState.detail || "";
+
+    if (latestState.connection !== "CONNECTED") {
+      bodyEl.innerHTML =
+        '<p class="empty">' + activeTab + ": no data -- the EA is not connected. " +
+        "(Real data starts once a VO_EA process (Phase 10+) is running and reaches this " +
+        "dashboard over its telemetry socket.)</p>";
+      return;
+    }
+
+    var dl = document.createElement("dl");
+    Object.keys(latestState).forEach(function (key) {
+      var dt = document.createElement("dt");
+      dt.textContent = key;
+      var dd = document.createElement("dd");
+      dd.textContent = latestState[key] === null || latestState[key] === undefined
+        ? "(none)"
+        : String(latestState[key]);
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+
+    bodyEl.innerHTML = "";
+    bodyEl.appendChild(dl);
+  }
+
+  function connect() {
+    var protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var ws = new WebSocket(protocol + "//" + window.location.host + "/ws/runtime");
+
+    ws.onopen = function () {
+      detailEl.textContent = "";
+    };
+    ws.onmessage = function (event) {
+      try {
+        latestState = JSON.parse(event.data);
+        render();
+      } catch (err) {
+        console.error("unparseable RuntimeState message", err);
+      }
+    };
+    ws.onclose = function () {
+      badgeEl.textContent = "DISCONNECTED";
+      badgeEl.style.background = "var(--bad)";
+      badgeEl.style.color = "#0d1117";
+      detailEl.textContent = "lost connection to the dashboard backend -- retrying";
+      setTimeout(connect, 3000);
+    };
+    ws.onerror = function () {
+      ws.close();
+    };
+  }
+
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>

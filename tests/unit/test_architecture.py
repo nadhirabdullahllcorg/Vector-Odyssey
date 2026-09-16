@@ -39,6 +39,7 @@ LAYERS: dict[str, int] = {
     "vo.month01": 4,
     "vo.research": 5,
     "vo.core": 6,
+    "vo.telemetry": 7,
 }
 
 # Only this module may talk to the terminal.
@@ -364,3 +365,32 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
 )
 def test_public_packages_import_cleanly(module: str) -> None:
     __import__(module)
+
+
+# ── R11: the dashboard never becomes part of the trading path ──────────────
+#
+# The dashboard (nominally Phase 22, scaffolded early as its own parallel
+# track -- see architecture/vo-phase-plan.md SS10a) is a separate process by
+# design: "EA fully functional with dashboard closed" is its own gate, and
+# the architecture audit names this exact risk (R11) with this exact
+# mitigation: "an architecture test forbids vo.runtime importing dashboard."
+# Checked over the whole `vo` package, not just `vo.core`/`vo.runtime`,
+# since any accidental import anywhere would defeat the point.
+
+
+def test_vo_does_not_import_dashboard() -> None:
+    offenders: list[str] = []
+
+    for path in _python_files(VO_ROOT):
+        module = _module_name(path, VO_ROOT)
+
+        for imported in _imports_of(path):
+            if imported == "dashboard" or imported.startswith("dashboard."):
+                offenders.append(f"{module} imports {imported}")
+
+    assert not offenders, (
+        "Gate: the dashboard must stay a pure, optional consumer of "
+        "vo.telemetry -- nothing in vo may import it back:\n  "
+        + "\n  ".join(offenders)
+    )
+
