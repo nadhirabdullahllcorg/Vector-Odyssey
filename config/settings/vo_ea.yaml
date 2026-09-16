@@ -1,0 +1,40 @@
+# config/settings/vo_ea.yaml        Phase 10's "one config"
+#
+# One VO_EA v1 process (scripts/run_vo_ea.py) reads this once at startup.
+# This is NOT the versioned VO<->EA settings schema (SS1 -- still unbuilt,
+# see dashboard/backend/settings_store.py's own honest placeholder and
+# Phase 20/22) -- just the static configuration this one process needs to
+# find the wire files, the broker/session config, and where to publish
+# telemetry and log. No strategy settings live here, ever.
+version: 1
+
+instrument:
+  # Must match VO_Bridge.mq5's own _Symbol on the chart it is attached to
+  # -- config/settings/sessions.yaml is keyed by this same broker_symbol.
+  broker_symbol: "US100.n"
+
+wire:
+  # The terminal's MQL5\Files\<InpOutputSubdir>\ folder (VO_Transport.mqh
+  # / VO_Bridge.mq5's InpOutputSubdir, default "VectorOdyssey") -- found
+  # via MT5 -> File -> Open Data Folder -> MQL5\Files\VectorOdyssey. This
+  # is a real, machine-specific path (see tests/fixtures/golden/README.md,
+  # which uses the same folder to capture golden fixtures) -- the value
+  # below is a placeholder to fill in, not a guessed default.
+  dir: "REPLACE_WITH_YOUR_TERMINAL_DATA_FOLDER/MQL5/Files/VectorOdyssey"
+  poll_interval_seconds: 1.0
+
+config_files:
+  brokers: "config/settings/brokers.yaml"
+  sessions: "config/settings/sessions.yaml"
+
+telemetry:
+  # The EA is the TCP server; dashboard/backend/ea_link.py connects out to
+  # this address (its own VO_EA_TELEMETRY_HOST/PORT defaults match it).
+  host: "127.0.0.1"
+  port: 8765
+
+logging:
+  path: "logs/vo_ea.log"
+  level: "INFO"
+
+ea_phase: "10"

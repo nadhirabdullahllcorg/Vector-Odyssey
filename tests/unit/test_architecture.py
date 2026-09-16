@@ -369,6 +369,11 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.month01.ontology",
         "vo.core",
         "vo.core.replay",
+        "vo.core.config",
+        "vo.core.logging_setup",
+        "vo.core.pipeline",
+        "vo.telemetry.publisher",
+        "vo.telemetry.ea_runtime",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:
