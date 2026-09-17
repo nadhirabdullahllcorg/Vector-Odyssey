@@ -26,6 +26,7 @@ from vo.market.bar import Bar
 from vo.market.deserialization import AnyRecord
 from vo.market.identity import InstrumentId
 from vo.market.levels import PeriodOHLC, SessionOpens
+from vo.market.records import SourceCapabilitiesRecord
 from vo.market.sequence import BarSequence, CandleWindow
 from vo.market.symbol import Symbol
 from vo.market.tick import Tick
@@ -115,6 +116,11 @@ class ObservationPipeline:
             self.quarantined.append(QuarantinedInboundRecord(record=record, reason=str(exc)))
 
     def _ingest(self, record: AnyRecord) -> None:
+        if isinstance(record, SourceCapabilitiesRecord):
+            # Source-capability metadata (what the feed can provide), not an
+            # observation -- nothing to resolve or store. Ignore it rather
+            # than quarantine it, so it does not inflate the quarantine count.
+            return
         resolved = resolve_record(record, self._broker_profiles)
 
         if isinstance(resolved, Symbol):

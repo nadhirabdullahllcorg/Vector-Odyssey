@@ -12,7 +12,12 @@ from datetime import datetime
 from pathlib import Path
 
 from vo.core.pipeline import ObservationPipeline
-from vo.market.records import BarRecordV2, SymbolRecordV2, TickRecordV2
+from vo.market.records import (
+    BarRecordV2,
+    SourceCapabilitiesRecord,
+    SymbolRecordV2,
+    TickRecordV2,
+)
 from vo.time.brokers import load_broker_profiles
 from vo.time.sessions import load_session_configs
 
@@ -173,3 +178,21 @@ def test_a_duplicate_bar_is_quarantined_not_raised() -> None:
 
     assert pipeline.snapshot().bar_count == 1
     assert len(pipeline.quarantined) == 1
+
+
+def test_source_capabilities_record_is_ignored_not_quarantined() -> None:
+    """A SourceCapabilitiesRecord describes what the feed can provide -- it is
+    not an observation, so the pipeline skips it rather than quarantining it
+    (otherwise it silently inflates VO_EA's quarantine count)."""
+    pipeline = _pipeline()
+    pipeline.ingest(
+        SourceCapabilitiesRecord(
+            platform="MT5",
+            broker_server="1xTrade-Server",
+            broker_symbol="US100.n",
+            real_volume_available=False,
+            tick_level_available=True,
+        )
+    )
+    assert pipeline.quarantined == []
+    assert len(pipeline.sequence) == 0

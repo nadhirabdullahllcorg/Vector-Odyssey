@@ -135,7 +135,13 @@ def _build_sequence(
             real_volume=record.real_volume,
             spread=record.spread,
         )
-        sequence = sequence.append(bar)
+        try:
+            sequence = sequence.append(bar)
+        except ValueError:
+            # Out-of-order / duplicate bar -- a stale wire file with several
+            # concatenated backfills. Skip it, exactly as ObservationPipeline
+            # quarantines it, rather than crashing the publish.
+            continue
         broker_epoch_by_utc[resolution.utc] = int(
             record.timestamp.replace(tzinfo=UTC).timestamp()
         )
