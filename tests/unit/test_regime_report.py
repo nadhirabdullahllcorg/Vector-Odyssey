@@ -332,3 +332,29 @@ def test_build_regime_report_wires_session_breakdown_when_given_bars_and_config(
     )
     assert with_config.per_session != ()
     assert sum(s.bar_count for s in with_config.per_session) == 5
+
+
+def test_duration_uses_bar_count_not_wall_clock_when_bars_given() -> None:
+    """The exact bug this fix targets: a segment spanning a gap with no
+    bars in it (a stand-in for a weekend or the daily off-session close)
+    must not have that gap counted as duration once real bars are
+    supplied -- only the bars that actually exist should count."""
+    # EXPANSION starts at minute 0. Bars exist for minutes 0-9 (10 bars),
+    # then a big gap (no bars for "minutes" 10-999 -- a stand-in weekend),
+    # then bars resume at minute 1000-1009 (10 more bars) before the
+    # segment ends at minute 1010.
+    segments = (_seg(RegimeType.EXPANSION, 0, 1010),)
+    bars = tuple(_bar(m) for m in list(range(10)) + list(range(1000, 1010)))
+
+    without_bars = build_regime_report(
+        segments, (), transitions_log=(), history_end_utc=_at(1010)
+    )
+    exp_wallclock = without_bars.per_regime[0]
+    assert exp_wallclock.total_minutes == 1010.0  # the old, wrong behavior
+
+    with_bars = build_regime_report(
+        segments, (), transitions_log=(), history_end_utc=_at(1010), bars=bars
+    )
+    exp_real = with_bars.per_regime[0]
+    assert exp_real.total_minutes == 20.0  # only the 20 bars that actually exist
+    assert exp_real.share == 1.0  # still the only regime, still 100% of real time

@@ -25,6 +25,22 @@ what session an instant belongs to. This is additive telemetry only
 the report slices what already happened. Whether the classifier itself
 should ever treat a session boundary as meaningful is a separate, G6-
 gated design question this module does not answer.
+
+DURATION IS MEASURED IN TRADING MINUTES, NOT WALL-CLOCK. A segment's
+[start_utc, end_utc) can span a weekend or the daily inter-session gap
+(the market has no bars at all during either) -- subtracting timestamps
+directly would silently count that closed-market time as if the regime
+had "lasted" through it, which measurably distorted every duration
+figure this module reports (found empirically: on a real 100k-bar
+backtest, total reported minutes across all regimes summed to within
+rounding of the entire multi-month CALENDAR span, even though only
+~69% of that span had any bars at all). When `bars` is supplied, a
+segment's duration is the count of bars that actually fall inside it,
+times `minutes_per_bar` -- never a timestamp subtraction. Without
+`bars` (some unit tests exercise the arithmetic on hand-built segments
+with no real bar data), the old wall-clock subtraction remains as an
+explicit fallback -- approximate, and it will overcount a segment that
+happens to span a gap.
 """
 
 from __future__ import annotations
@@ -213,6 +229,33 @@ def build_session_breakdown(
     return tuple(stats)
 
 
+def _bar_counts_per_segment(
+    segments: Sequence[RegimeSegment], bars: Sequence[Bar]
+) -> list[int]:
+    """Parallel to `segments`: how many bars actually fall inside each
+    segment's [start_utc, end_utc) span. Segments tile the bars
+    contiguously and in chronological order (build_regime_segments' own
+    contract), so one linear merge pass over sorted bars suffices --
+    the same tiling walk build_session_breakdown uses, minus the session
+    lookup, kept separate so this has no session_config dependency."""
+    order = sorted(range(len(segments)), key=lambda i: segments[i].start_utc)
+    counts = [0] * len(segments)
+    n = len(order)
+    pos = 0
+    for bar in sorted(bars, key=lambda b: b.open_time_utc):
+        t = bar.open_time_utc
+        while pos < n - 1:
+            current_end = segments[order[pos]].end_utc
+            if current_end is None or t < current_end:
+                break
+            pos += 1
+        if pos < n:
+            seg = segments[order[pos]]
+            if t >= seg.start_utc and (seg.end_utc is None or t < seg.end_utc):
+                counts[order[pos]] += 1
+    return counts
+
+
 def build_regime_report(
     segments: tuple[RegimeSegment, ...],
     states: tuple[RegimeState, ...],
@@ -240,22 +283,36 @@ def build_regime_report(
     transition. The real log has no such gap.
 
     `bars` and `session_config` are both optional and additive: pass both
-    to also get a per-session breakdown (see build_session_breakdown);
-    leave either out and `per_session` is simply empty, same report as
-    before this existed."""
-    del minutes_per_bar  # durations are wall-clock; kept for signature clarity
-
-    # Duration per segment, in minutes of wall-clock. RETRACEMENT/REVERSAL
-    # never appear here -- they have no segments (see build_regime_segments'
-    # own docstring on zero-width runs) -- which is exactly right, since
-    # they are momentary by the engine's own design, not a duration.
+    to also get a per-session breakdown (see build_session_breakdown).
+    `bars` alone (no session_config) still upgrades duration accounting
+    from wall-clock to actual trading minutes -- see the module
+    docstring's DURATION IS MEASURED IN TRADING MINUTES section. Leave
+    both out and behavior is unchanged from before either existed."""
+    # Duration per segment. RETRACEMENT/REVERSAL never appear here -- they
+    # have no segments (see build_regime_segments' own docstring on
+    # zero-width runs) -- which is exactly right, since they are momentary
+    # by the engine's own design, not a duration.
     durations: dict[RegimeType, list[float]] = {}
-    for seg in segments:
-        end = seg.end_utc if seg.end_utc is not None else history_end_utc
-        if end is None:
-            continue
-        minutes = (end - seg.start_utc).total_seconds() / 60.0
-        durations.setdefault(seg.regime, []).append(minutes)
+    if bars:
+        # Real trading minutes: count the bars actually inside each
+        # segment. A weekend or the daily off-session gap contributes
+        # zero bars, so it contributes zero minutes -- exactly right.
+        bar_counts = _bar_counts_per_segment(segments, bars)
+        for seg, count in zip(segments, bar_counts, strict=True):
+            if count == 0:
+                continue  # no bars actually landed here -- nothing to count
+            durations.setdefault(seg.regime, []).append(count * minutes_per_bar)
+    else:
+        # Fallback for callers with no real bars (some unit tests exercise
+        # the aggregation arithmetic on hand-built segments only) --
+        # wall-clock subtraction, which overcounts any segment spanning a
+        # weekend or inter-session gap. Prefer passing `bars`.
+        for seg in segments:
+            end = seg.end_utc if seg.end_utc is not None else history_end_utc
+            if end is None:
+                continue
+            minutes = (end - seg.start_utc).total_seconds() / 60.0
+            durations.setdefault(seg.regime, []).append(minutes)
 
     grand_total = sum(sum(v) for v in durations.values()) or 1.0
 
