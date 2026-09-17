@@ -86,6 +86,21 @@ input, exactly like the report table it mirrors. (v4 also moved
 drawing responsibility from the retired VO_Regime.mq5 into
 VO_ReferenceLevels.mq5, per the user's explicit consolidation request --
 a UI change only; this module's feed format and gates are unaffected.)
+
+REGIME EVIDENCE (v5). BAND and MARK lines now carry the same
+efficiency_ratio/hurst_exponent RegimeState.supporting_features already
+recorded as [VO-D] evidence (vo.observation.regime) -- not a new
+computation, purely exposing what the engine already computes and
+records on every RegimeState, at the user's explicit request to see
+"the regime evidence" on the chart. Neither value drives the band's
+color, shape, or the classifier in any way (gate G2 unchanged): ER/
+Hurst remain recorded evidence a human can read next to a band or
+marker, never an independent signal. Empty when the engine had not yet
+computed a value for that record (its own warmup window -- see
+vo.observation.regime's ER/Hurst period configuration). This is
+strictly additive to the band/marker field layout: the new fields are
+appended after the existing ones, so a v4 feed's first ten/seven
+fields parse identically under v5 -- only the trailing two are new.
 """
 
 from __future__ import annotations
@@ -114,9 +129,22 @@ if TYPE_CHECKING:
     # change.
     from vo.telemetry.regime_report import SessionRegimeStats
 
-FEED_VERSION = 4
+FEED_VERSION = 5
 FEED_DELIMITER = "|"
 _COMMENT_PREFIX = "#"
+
+
+def _feature_value(state: RegimeState, name: str) -> float | None:
+    """Look up one named RegimeFeature's value on a RegimeState's
+    supporting_features (efficiency_ratio / hurst_exponent), or None if
+    the engine had not yet computed it (warmup) -- same lookup as
+    vo.telemetry.regime_report._feature_value, duplicated locally rather
+    than imported to avoid a runtime import cycle (see the TYPE_CHECKING
+    guard above: regime_report already imports FROM this module)."""
+    for feature in state.supporting_features:
+        if feature.name == name:
+            return feature.value
+    return None
 
 
 @dataclass(frozen=True)
@@ -126,8 +154,12 @@ class RegimeSegment:
     start_utc/end_utc are resolved UTC instants (end_utc is None while the
     run is still the current, open-ended regime). high/low bound the
     price action across the run's bars -- the vertical extent of the band.
-    object_id/confidence/anticipated come from the run's freshest record
-    (gate G8 traceability); direction is that record's direction.
+    object_id/confidence/anticipated/efficiency_ratio/hurst_exponent come
+    from the run's freshest record (gate G8 traceability; efficiency_ratio/
+    hurst_exponent are the same [VO-D] evidence RegimeState.supporting_
+    features already carries, not a new computation -- v5, at the user's
+    request to see regime evidence on the chart); direction is that
+    record's direction.
     """
 
     regime: RegimeType
@@ -138,6 +170,8 @@ class RegimeSegment:
     low: float
     confidence: float
     anticipated: AnticipatedResolution | None
+    efficiency_ratio: float | None
+    hurst_exponent: float | None
     object_id: str
     methodology_version: int
     instrument_key: str
@@ -233,6 +267,8 @@ def build_regime_segments(
                 low=seg_low,
                 confidence=rep.confidence,
                 anticipated=rep.anticipated_resolution,
+                efficiency_ratio=_feature_value(rep, "efficiency_ratio"),
+                hurst_exponent=_feature_value(rep, "hurst_exponent"),
                 object_id=rep.object_id,
                 methodology_version=rep.methodology_version,
                 instrument_key=rep.instrument_id.key,
@@ -250,14 +286,19 @@ class RegimeMarker:
     alongside RegimeSegment rather than as a zero-width one. Anchored at
     the bar matching the source RegimeState's observed_at; priced at that
     bar's close (always present, unlike a band's high/low which need a
-    bar range to bound). object_id/confidence trace back to the real
-    RegimeState (gate G8); direction is that record's direction."""
+    bar range to bound). object_id/confidence/efficiency_ratio/
+    hurst_exponent trace back to the real RegimeState (gate G8) -- the
+    marker is the single instant the [VO-H] anticipation lean gets
+    checked against reality, so its evidence travels with it too (v5);
+    direction is that record's direction."""
 
     regime: RegimeType
     direction: RegimeDirection | None
     at_utc: datetime
     price: float
     confidence: float
+    efficiency_ratio: float | None
+    hurst_exponent: float | None
     object_id: str
     methodology_version: int
     instrument_key: str
@@ -290,6 +331,8 @@ def build_regime_markers(
                 at_utc=state.observed_at,
                 price=bar.close,
                 confidence=state.confidence,
+                efficiency_ratio=_feature_value(state, "efficiency_ratio"),
+                hurst_exponent=_feature_value(state, "hurst_exponent"),
                 object_id=state.object_id,
                 methodology_version=state.methodology_version,
                 instrument_key=state.instrument_id.key,
@@ -367,14 +410,18 @@ def feed_header(
 
 
 def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> str:
-    """One pipe-delimited band line: a "BAND" tag then nine fields (ten
-    total), MQL5-parseable.
+    """One pipe-delimited band line: a "BAND" tag then eleven fields
+    (twelve total), MQL5-parseable.
 
     Fields: BAND | object_id | regime | direction | start_epoch |
-    end_epoch | high | low | confidence | anticipated. `direction` is
-    NONE when absent, `anticipated` is empty when absent, `end_epoch` is
-    0 for the open-ended final band. Broker-server epoch seconds are
-    supplied by the caller; this module never converts time itself.
+    end_epoch | high | low | confidence | anticipated |
+    efficiency_ratio | hurst_exponent. `direction` is NONE when absent,
+    `anticipated`/`efficiency_ratio`/`hurst_exponent` are empty when
+    absent (efficiency_ratio/hurst_exponent are None during the
+    engine's ER/Hurst warmup window -- see vo.observation.regime),
+    `end_epoch` is 0 for the open-ended final band. Broker-server epoch
+    seconds are supplied by the caller; this module never converts time
+    itself.
     """
     if FEED_DELIMITER in segment.object_id:
         raise ValueError(
@@ -383,6 +430,10 @@ def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> st
         )
     direction = segment.direction.name if segment.direction is not None else "NONE"
     anticipated = segment.anticipated.name if segment.anticipated is not None else ""
+    efficiency_ratio = (
+        "" if segment.efficiency_ratio is None else repr(segment.efficiency_ratio)
+    )
+    hurst_exponent = "" if segment.hurst_exponent is None else repr(segment.hurst_exponent)
     fields = [
         _BAND_TAG,
         segment.object_id,
@@ -394,19 +445,25 @@ def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> st
         repr(segment.low),
         repr(segment.confidence),
         anticipated,
+        efficiency_ratio,
+        hurst_exponent,
     ]
     return FEED_DELIMITER.join(fields)
 
 
 def marker_line(marker: RegimeMarker, *, at_epoch: int) -> str:
-    """One pipe-delimited marker line: a "MARK" tag then six fields
-    (seven total) -- deliberately fewer fields than a band line (and a
+    """One pipe-delimited marker line: a "MARK" tag then eight fields
+    (nine total) -- still fewer fields than a band line (and a
     different tag), so a marker can never be mistaken for one even by a
     parser that only counts fields.
 
     Fields: MARK | object_id | regime | direction | at_epoch | price |
-    confidence. `regime` is always RETRACEMENT or REVERSAL (see
-    build_regime_markers).
+    confidence | efficiency_ratio | hurst_exponent. `regime` is always
+    RETRACEMENT or REVERSAL (see build_regime_markers) -- this is the
+    single instant the [VO-H] anticipation lean gets checked against
+    reality, so the same evidence a band's tooltip shows is carried
+    here too. efficiency_ratio/hurst_exponent are empty when the engine
+    had not yet computed them (warmup).
     """
     if FEED_DELIMITER in marker.object_id:
         raise ValueError(
@@ -414,6 +471,10 @@ def marker_line(marker: RegimeMarker, *, at_epoch: int) -> str:
             f"{FEED_DELIMITER!r} -- would corrupt the line"
         )
     direction = marker.direction.name if marker.direction is not None else "NONE"
+    efficiency_ratio = (
+        "" if marker.efficiency_ratio is None else repr(marker.efficiency_ratio)
+    )
+    hurst_exponent = "" if marker.hurst_exponent is None else repr(marker.hurst_exponent)
     fields = [
         _MARK_TAG,
         marker.object_id,
@@ -422,6 +483,8 @@ def marker_line(marker: RegimeMarker, *, at_epoch: int) -> str:
         str(at_epoch),
         repr(marker.price),
         repr(marker.confidence),
+        efficiency_ratio,
+        hurst_exponent,
     ]
     return FEED_DELIMITER.join(fields)
 

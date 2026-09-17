@@ -15,6 +15,7 @@ from vo.observation.regime import (
     OBJECT_TYPE_REGIME_STATE,
     AnticipatedResolution,
     RegimeDirection,
+    RegimeFeature,
     RegimeState,
     RegimeType,
 )
@@ -63,6 +64,7 @@ def _state(
     anticipated: AnticipatedResolution | None = None,
     supersedes: str | None = None,
     suffix: str = "",
+    supporting_features: tuple[RegimeFeature, ...] = (),
 ) -> RegimeState:
     return RegimeState(
         object_type=OBJECT_TYPE_REGIME_STATE,
@@ -77,6 +79,7 @@ def _state(
         direction=direction,
         confidence=confidence,
         evidence="test",
+        supporting_features=supporting_features,
         anticipated_resolution=anticipated,
     )
 
@@ -226,11 +229,11 @@ def test_render_feed_lines_has_header_then_one_line_per_band() -> None:
     assert "markers=0" in lines[0]  # this scenario's lone RETRACEMENT is open-ended, not dropped
     assert len(lines) == 1 + len(segments)
 
-    # Each band line: a "BAND" tag then 9 delimited fields (10 total).
+    # Each band line: a "BAND" tag then 11 delimited fields (12 total).
     for line in lines[1:]:
         fields = line.split(FEED_DELIMITER)
         assert fields[0] == "BAND"
-        assert len(fields) == 10
+        assert len(fields) == 12
 
     # The open-ended final band carries end_epoch 0.
     last = lines[-1].split(FEED_DELIMITER)
@@ -242,12 +245,40 @@ def test_feed_line_encodes_absent_direction_and_anticipation() -> None:
     states, bars = _scenario()
     segments = build_regime_segments(states, bars)
 
-    consolidation = segments[0]  # no direction, no anticipation
+    consolidation = segments[0]  # no direction, no anticipation, no ER/Hurst
     line = feed_line(consolidation, start_epoch=10, end_epoch=20)
     fields = line.split(FEED_DELIMITER)
     assert fields[0] == "BAND"
     assert fields[3] == "NONE"  # direction
     assert fields[9] == ""  # anticipated
+    assert fields[10] == ""  # efficiency_ratio -- _scenario()'s states carry no evidence
+    assert fields[11] == ""  # hurst_exponent
+
+
+def test_feed_line_encodes_efficiency_ratio_and_hurst_exponent_when_present() -> None:
+    """v5: a band's evidence fields mirror the freshest record's
+    RegimeState.supporting_features -- the same [VO-D] evidence already
+    recorded, not a new computation, per the user's request to see it
+    on the chart."""
+    state = _state(
+        RegimeType.EXPANSION,
+        0,
+        direction=RegimeDirection.UP,
+        supporting_features=(
+            RegimeFeature(name="efficiency_ratio", value=0.42, methodology="kaufman/period=10"),
+            RegimeFeature(
+                name="hurst_exponent", value=0.61, methodology="structure_function/period=20"
+            ),
+        ),
+    )
+    bars = [_bar(0, high=101.0, low=99.0), _bar(1, high=102.0, low=100.0)]
+    segments = build_regime_segments([state], bars)
+    assert len(segments) == 1
+
+    line = feed_line(segments[0], start_epoch=0, end_epoch=0)
+    fields = line.split(FEED_DELIMITER)
+    assert fields[10] == repr(0.42)
+    assert fields[11] == repr(0.61)
 
 
 def test_feed_line_rejects_object_id_containing_the_delimiter() -> None:
@@ -262,6 +293,8 @@ def test_feed_line_rejects_object_id_containing_the_delimiter() -> None:
         low=segment.low,
         confidence=segment.confidence,
         anticipated=segment.anticipated,
+        efficiency_ratio=segment.efficiency_ratio,
+        hurst_exponent=segment.hurst_exponent,
         object_id=f"bad{FEED_DELIMITER}id",
         methodology_version=segment.methodology_version,
         instrument_key=segment.instrument_key,
@@ -324,10 +357,12 @@ def test_marker_line_format_and_delimiter_guard() -> None:
     line = marker_line(marker, at_epoch=42)
     fields = line.split(FEED_DELIMITER)
     assert fields[0] == "MARK"
-    assert len(fields) == 7
+    assert len(fields) == 9
     assert fields[2] == "RETRACEMENT"
     assert fields[3] == "UP"
     assert fields[4] == "42"
+    assert fields[7] == ""  # efficiency_ratio -- _resolution_scenario()'s states carry no evidence
+    assert fields[8] == ""  # hurst_exponent
 
     poisoned = type(marker)(
         regime=marker.regime,
@@ -335,6 +370,8 @@ def test_marker_line_format_and_delimiter_guard() -> None:
         at_utc=marker.at_utc,
         price=marker.price,
         confidence=marker.confidence,
+        efficiency_ratio=marker.efficiency_ratio,
+        hurst_exponent=marker.hurst_exponent,
         object_id=f"bad{FEED_DELIMITER}id",
         methodology_version=marker.methodology_version,
         instrument_key=marker.instrument_key,
@@ -342,6 +379,44 @@ def test_marker_line_format_and_delimiter_guard() -> None:
     )
     with pytest.raises(ValueError, match="delimiter"):
         marker_line(poisoned, at_epoch=1)
+
+
+def test_marker_line_encodes_efficiency_ratio_and_hurst_exponent_when_present() -> None:
+    """v5: the resolution marker carries the same evidence a band does --
+    it is the single instant the [VO-H] anticipation lean is checked
+    against reality, so the evidence belongs there too."""
+    bars = [
+        _bar(0, high=100.0, low=99.0),
+        _bar(1, high=101.0, low=99.5),
+        _bar(2, high=104.0, low=100.5),
+        _bar(3, high=107.0, low=103.0),
+    ]
+    states = [
+        _state(RegimeType.EXPANSION, 0, direction=RegimeDirection.UP),
+        _state(RegimeType.PULLBACK_UNRESOLVED, 1),
+        _state(
+            RegimeType.RETRACEMENT,
+            2,
+            direction=RegimeDirection.UP,
+            confidence=1.0,
+            supersedes="US100:M1:REGIME:PULLBACK_UNRESOLVED:1",
+            supporting_features=(
+                RegimeFeature(
+                    name="efficiency_ratio", value=0.75, methodology="kaufman/period=10"
+                ),
+                RegimeFeature(
+                    name="hurst_exponent", value=0.55, methodology="structure_function/period=20"
+                ),
+            ),
+        ),
+        _state(RegimeType.EXPANSION, 2, direction=RegimeDirection.UP, suffix="b"),
+    ]
+    marker = build_regime_markers(states, bars)[0]
+
+    line = marker_line(marker, at_epoch=42)
+    fields = line.split(FEED_DELIMITER)
+    assert fields[7] == repr(0.75)
+    assert fields[8] == repr(0.55)
 
 
 def test_render_feed_lines_tags_and_counts_bands_and_markers_separately() -> None:
@@ -366,9 +441,9 @@ def test_render_feed_lines_tags_and_counts_bands_and_markers_separately() -> Non
     for line in lines[1:]:
         fields = line.split(FEED_DELIMITER)
         if fields[0] == "MARK":
-            assert len(fields) == 7
+            assert len(fields) == 9
         else:
-            assert len(fields) == 10
+            assert len(fields) == 12
 
 
 def _session_config() -> SessionConfig:

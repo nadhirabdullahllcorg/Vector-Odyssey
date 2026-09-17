@@ -43,6 +43,8 @@ def _seg(regime: RegimeType, start_min: int, end_min: int | None) -> RegimeSegme
         low=9.0,
         confidence=0.6,
         anticipated=None,
+        efficiency_ratio=None,
+        hurst_exponent=None,
         object_id=f"seg:{regime.name}:{start_min}",
         methodology_version=1,
         instrument_key="MT5:Test:US100",
