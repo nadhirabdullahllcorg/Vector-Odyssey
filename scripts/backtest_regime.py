@@ -3,7 +3,7 @@
 Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
     python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] \
-        [--validate] [--hurst-report] [--er-report]
+        [--validate] [--hurst-report] [--er-report] [--markov-report]
 
 --validate additionally builds a Regime Engine Validation Report v1
 (vo.telemetry.regime_validation) from the SAME in-memory replay -- no
@@ -24,6 +24,16 @@ characterization report (vo.research.efficiency_ratio_report) from the
 SAME in-memory replay, same sections and sampling discipline as
 --hurst-report -- and writes efficiency_ratio_report_<symbol>.md.
 Independent of --validate and --hurst-report; any combination may be
+passed.
+
+--markov-report additionally builds Phase 17's standalone conditional
+Markov transition study (vo.research.markov_report) from the SAME
+in-memory replay -- baseline + Month 1 structural constraint check, by
+session, by Hurst tercile, by Efficiency Ratio tercile, by preceding
+pullback duration -- and writes markov_report_<symbol>.md. Reuses the
+same rolling Hurst/ER series --hurst-report/--er-report build (a fresh
+default-window-lengths sweep, independent of whether those flags are
+also passed). Independent of the other flags; any combination may be
 passed.
 
 The live publisher (scripts/publish_regime.py) only ever sees the ~500
@@ -89,6 +99,12 @@ from vo.research.hurst_report import (  # noqa: E402
     build_transition_hurst_report,
     render_hurst_report_markdown,
 )
+from vo.research.markov_report import (  # noqa: E402
+    build_preceding_pullback_duration_matrices,
+    build_session_matrices,
+    build_value_bucket_matrices,
+    render_markov_report_markdown,
+)
 from vo.research.regime_windows import RegimeInterval  # noqa: E402
 from vo.research.statistics import (  # noqa: E402
     build_out_of_sample_report,
@@ -128,12 +144,13 @@ REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool]:
+def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
     validate = False
     hurst_report = False
     er_report = False
+    markov_report = False
     rest = []
     i = 0
     while i < len(argv):
@@ -149,12 +166,15 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool]:
         elif argv[i] == "--er-report":
             er_report = True
             i += 1
+        elif argv[i] == "--markov-report":
+            markov_report = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
     if rest:
         config_path = rest[0]
-    return config_path, bars, validate, hurst_report, er_report
+    return config_path, bars, validate, hurst_report, er_report, markov_report
 
 
 def _write_feed_atomic(out_path: Path, text: str) -> None:
@@ -172,7 +192,9 @@ def _write_feed_atomic(out_path: Path, text: str) -> None:
 
 
 def main() -> None:
-    config_path, bar_cap, validate, hurst_report, er_report = _parse_args(sys.argv[1:])
+    config_path, bar_cap, validate, hurst_report, er_report, markov_report = _parse_args(
+        sys.argv[1:]
+    )
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
@@ -447,6 +469,56 @@ def main() -> None:
         er_report_path.write_text(er_markdown, encoding="utf-8")
         print(f"  -> ER report built in {time.monotonic() - _t_er:.1f}s", flush=True)
 
+    markov_report_path: Path | None = None
+    if markov_report:
+        print("building conditional Markov transition study (Phase 17)...", flush=True)
+        _t_markov = time.monotonic()
+        # a fresh default-window-lengths rolling sweep, independent of
+        # whether --hurst-report/--er-report were also passed -- see the
+        # module docstring's own note on this.
+        markov_hurst_window = regime_config.hurst_period
+        markov_er_window = regime_config.efficiency_ratio_period
+        markov_hurst_rolling = build_rolling_hurst(
+            sequence.bars, window_lengths=(markov_hurst_window,)
+        )
+        markov_er_rolling = build_rolling_er(sequence.bars, window_lengths=(markov_er_window,))
+
+        markov_baseline = build_transition_matrix(transitions_log)
+        markov_by_session = (
+            build_session_matrices(transitions_log, session_config)
+            if session_config is not None
+            else {}
+        )
+        markov_by_hurst, markov_hurst_cuts = build_value_bucket_matrices(
+            transitions_log,
+            markov_hurst_rolling.get(markov_hurst_window, []),
+            max_gap_minutes=90.0,
+        )
+        markov_by_er, markov_er_cuts = build_value_bucket_matrices(
+            transitions_log, markov_er_rolling.get(markov_er_window, []), max_gap_minutes=90.0
+        )
+        markov_by_duration, markov_duration_cuts = build_preceding_pullback_duration_matrices(
+            transitions_log, states
+        )
+        markov_markdown = render_markov_report_markdown(
+            instrument_key=config.broker_symbol,
+            timeframe_canonical="M1",
+            generated_utc=datetime.now(UTC),
+            baseline=markov_baseline,
+            by_session=markov_by_session,
+            by_hurst=markov_by_hurst,
+            hurst_cuts=markov_hurst_cuts,
+            hurst_window=markov_hurst_window,
+            by_er=markov_by_er,
+            er_cuts=markov_er_cuts,
+            er_window=markov_er_window,
+            by_pullback_duration=markov_by_duration,
+            pullback_duration_cuts=markov_duration_cuts,
+        )
+        markov_report_path = REPO_ROOT / f"markov_report_{config.broker_symbol}.md"
+        markov_report_path.write_text(markov_markdown, encoding="utf-8")
+        print(f"  -> Markov report built in {time.monotonic() - _t_markov:.1f}s", flush=True)
+
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
     coverage_pct = (trading_days / calendar_days * 100.0) if calendar_days > 0 else 100.0
@@ -474,6 +546,8 @@ def main() -> None:
         print(f"Hurst report written: {hurst_report_path}")
     if er_report_path is not None:
         print(f"ER report written: {er_report_path}")
+    if markov_report_path is not None:
+        print(f"Markov report written: {markov_report_path}")
     print()
     print(markdown)
 
