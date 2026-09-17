@@ -274,7 +274,26 @@ def main() -> None:
         generated_utc=datetime.now(UTC),
     )
     feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
-    _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
+    feed_written = True
+    try:
+        _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
+    except PermissionError as exc:
+        # Non-fatal: something else has the live feed file open (a live MT5
+        # chart with VO_ReferenceLevels.mq5 attached, or a still-running
+        # `publish_regime.py --watch` -- see this script's own module
+        # docstring). A multi-minute MT5 pull + replay is far too expensive
+        # to throw away over a best-effort chart-refresh write failing; the
+        # backtest/validation/Hurst reports below don't depend on this file
+        # at all, so they still get built and written.
+        feed_written = False
+        print(
+            f"  -> WARNING: could not write {feed_path} ({exc}). Something else has "
+            f"it open -- a live MT5 chart with VO_ReferenceLevels.mq5 attached, or a "
+            f"still-running `publish_regime.py --watch`, are the usual causes. "
+            f"Continuing without updating the live feed; the reports below are "
+            f"unaffected.",
+            flush=True,
+        )
     print(f"  -> feed/report built in {time.monotonic() - _t_build:.1f}s", flush=True)
 
     validation_report_path: Path | None = None
@@ -367,7 +386,10 @@ def main() -> None:
         print("session lines:    skipped (no session config)")
     else:
         print(f"session lines:    {len(boundaries)} (session-boundary vertical lines)")
-    print(f"feed written:     {feed_path}")
+    if feed_written:
+        print(f"feed written:     {feed_path}")
+    else:
+        print(f"feed NOT written: {feed_path} (permission denied -- see warning above)")
     print(f"report written:   {report_path}")
     if validation_report_path is not None:
         print(f"validation report written: {validation_report_path}")
