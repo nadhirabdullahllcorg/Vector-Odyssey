@@ -98,17 +98,17 @@
 //| looks wrong, the bug is in the Python engine or the feed, never   |
 //| here.                                                             |
 //|                                                                  |
-//| REGIME -- FEED FORMAT (vo.telemetry.regime_feed, v4). Lines       |
+//| REGIME -- FEED FORMAT (vo.telemetry.regime_feed, v5). Lines       |
 //| beginning '#' are provenance comments and are skipped. Every      |
 //| other line's FIRST field is a tag -- "BAND", "MARK", "SESN" or    |
 //| "SSTAT" -- so none of the four can ever be confused even by field |
 //| count alone:                                                      |
 //|                                                                  |
 //|   BAND  | object_id | regime | direction | start_epoch |          |
-//|         | end_epoch | high | low | confidence | anticipated       |
-//|         (10 fields)                                               |
+//|         | end_epoch | high | low | confidence | anticipated |     |
+//|         efficiency_ratio | hurst_exponent      (12 fields)         |
 //|   MARK  | object_id | regime | direction | at_epoch | price |      |
-//|         confidence                        (7 fields)               |
+//|         confidence | efficiency_ratio | hurst_exponent (9 fields)  |
 //|   SESN  | at_epoch | from_session | to_session      (4 fields)     |
 //|   SSTAT | session | regime | bar_count | total_minutes |            |
 //|         share_of_session | segments_started    (7 fields)          |
@@ -123,6 +123,12 @@
 //|   still current -- extended to the latest chart bar.              |
 //| - anticipated: RETRACEMENT / REVERSAL / UNCLEAR / empty -- only   |
 //|   ever set on a PULLBACK_UNRESOLVED band (the [VO-H] lean).        |
+//| - efficiency_ratio / hurst_exponent (v5): the same [VO-D] evidence |
+//|   RegimeState.supporting_features already records -- not a new     |
+//|   computation, exposed on request so the evidence behind a band's  |
+//|   confidence/lean is readable on the chart, never a decision-path  |
+//|   input (gate G2 unchanged). Empty when the engine had not yet     |
+//|   computed a value (its own ER/Hurst warmup window).               |
 //| - SSTAT is an AGGREGATE over the whole run (no timestamp) -- it   |
 //|   is drawn as a fixed right-anchored summary panel, not a chart-   |
 //|   time-anchored object, per the user's explicit instruction that  |
@@ -195,8 +201,8 @@
 #define VO_TAG_MARK "MARK"
 #define VO_TAG_SESN "SESN"
 #define VO_TAG_SSTAT "SSTAT"
-#define VO_FEED_BAND_FIELDS 10
-#define VO_FEED_MARKER_FIELDS 7
+#define VO_FEED_BAND_FIELDS 12
+#define VO_FEED_MARKER_FIELDS 9
 #define VO_FEED_SESSION_FIELDS 4
 #define VO_FEED_SESSION_STAT_FIELDS 7
 
@@ -938,15 +944,17 @@ void VO_ReadAndDraw()
 void VO_DrawBand(const string &f[], const datetime live_edge, const int ordinal)
   {
    // f[0] is the "BAND" tag (already checked by the caller).
-   const string object_id   = f[1];
-   const string regime      = f[2];
-   const string direction   = f[3];
-   const datetime start_t   = (datetime)StringToInteger(f[4]);
-   const long   end_epoch   = StringToInteger(f[5]);
-   const double high        = StringToDouble(f[6]);
-   const double low         = StringToDouble(f[7]);
-   const double confidence  = StringToDouble(f[8]);
-   const string anticipated = f[9];
+   const string object_id       = f[1];
+   const string regime          = f[2];
+   const string direction       = f[3];
+   const datetime start_t       = (datetime)StringToInteger(f[4]);
+   const long   end_epoch       = StringToInteger(f[5]);
+   const double high            = StringToDouble(f[6]);
+   const double low             = StringToDouble(f[7]);
+   const double confidence      = StringToDouble(f[8]);
+   const string anticipated     = f[9];
+   const string efficiency_ratio = f[10]; // v5: [VO-D] evidence, empty during warmup
+   const string hurst_exponent   = f[11];
 
    const datetime end_t = (end_epoch == 0) ? live_edge : (datetime)end_epoch;
    const color clr = VO_RegimeColor(regime);
@@ -970,9 +978,16 @@ void VO_DrawBand(const string &f[], const datetime live_edge, const int ordinal)
 
    const string dir_text = (direction == "NONE") ? "" : (" " + direction);
    const string ant_text = (StringLen(anticipated) > 0) ? ("\nlean: " + anticipated) : "";
+   // v5: the same ER/Hurst evidence RegimeState.supporting_features already
+   // records, shown here on request -- never fed back into the classifier.
+   const string evidence_text = (StringLen(efficiency_ratio) > 0 || StringLen(hurst_exponent) > 0)
+      ? StringFormat("\nER: %s  Hurst: %s",
+                      (StringLen(efficiency_ratio) > 0) ? efficiency_ratio : "n/a",
+                      (StringLen(hurst_exponent) > 0) ? hurst_exponent : "n/a")
+      : "";
    const string tooltip = StringFormat(
-      "VO Regime: %s%s\nconfidence: %s%s\nid: %s",
-      regime, dir_text, DoubleToString(confidence, 2), ant_text, object_id);
+      "VO Regime: %s%s\nconfidence: %s%s%s\nid: %s",
+      regime, dir_text, DoubleToString(confidence, 2), ant_text, evidence_text, object_id);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
 
    // Dated label at the band's top-left, so the chart is readable
@@ -1010,6 +1025,8 @@ void VO_DrawMarker(const string &f[], const int ordinal)
    const datetime at_t     = (datetime)StringToInteger(f[4]);
    const double price      = StringToDouble(f[5]);
    const double confidence = StringToDouble(f[6]);
+   const string efficiency_ratio = f[7]; // v5: [VO-D] evidence, empty during warmup
+   const string hurst_exponent   = f[8];
 
    const bool is_reversal   = (regime == "REVERSAL");
    const color clr          = is_reversal ? InpColorReversal : InpColorRetracement;
@@ -1032,9 +1049,16 @@ void VO_DrawMarker(const string &f[], const int ordinal)
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_CENTER);
 
    const string dir_text = (direction == "NONE") ? "" : (" " + direction);
+   // v5: same ER/Hurst evidence as VO_DrawBand -- read-only display, never
+   // fed back into the classifier (gate G2 unchanged).
+   const string evidence_text = (StringLen(efficiency_ratio) > 0 || StringLen(hurst_exponent) > 0)
+      ? StringFormat("\nER: %s  Hurst: %s",
+                      (StringLen(efficiency_ratio) > 0) ? efficiency_ratio : "n/a",
+                      (StringLen(hurst_exponent) > 0) ? hurst_exponent : "n/a")
+      : "";
    const string tooltip = StringFormat(
-      "VO Regime resolution: %s%s\nconfidence: %s\nid: %s",
-      regime, dir_text, DoubleToString(confidence, 2), object_id);
+      "VO Regime resolution: %s%s\nconfidence: %s%s\nid: %s",
+      regime, dir_text, DoubleToString(confidence, 2), evidence_text, object_id);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
 
    // Small text label, same convention as VO_DrawBand's -- readable
