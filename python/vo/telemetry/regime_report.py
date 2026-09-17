@@ -256,6 +256,39 @@ def _bar_counts_per_segment(
     return counts
 
 
+def durations_by_regime(
+    segments: Sequence[RegimeSegment],
+    *,
+    history_end_utc: datetime | None = None,
+    minutes_per_bar: float = 1.0,
+    bars: Sequence[Bar] = (),
+) -> dict[RegimeType, list[float]]:
+    """Per-segment duration (minutes), grouped by regime -- the same
+    computation build_regime_report does internally for its own per-regime
+    table, factored out so other telemetry (e.g. vo.telemetry.regime_
+    validation's duration-distribution/period-breakdown work) can reuse it
+    without recomputing or re-deriving the bar-counting logic. See the
+    module docstring's DURATION IS MEASURED IN TRADING MINUTES section --
+    `bars` gives real trading-minute accounting; without it, falls back to
+    wall-clock (approximate, overcounts a segment spanning a closed-market
+    gap)."""
+    durations: dict[RegimeType, list[float]] = {}
+    if bars:
+        bar_counts = _bar_counts_per_segment(segments, bars)
+        for seg, count in zip(segments, bar_counts, strict=True):
+            if count == 0:
+                continue
+            durations.setdefault(seg.regime, []).append(count * minutes_per_bar)
+    else:
+        for seg in segments:
+            end = seg.end_utc if seg.end_utc is not None else history_end_utc
+            if end is None:
+                continue
+            minutes = (end - seg.start_utc).total_seconds() / 60.0
+            durations.setdefault(seg.regime, []).append(minutes)
+    return durations
+
+
 def build_regime_report(
     segments: tuple[RegimeSegment, ...],
     states: tuple[RegimeState, ...],
@@ -292,27 +325,12 @@ def build_regime_report(
     # have no segments (see build_regime_segments' own docstring on
     # zero-width runs) -- which is exactly right, since they are momentary
     # by the engine's own design, not a duration.
-    durations: dict[RegimeType, list[float]] = {}
-    if bars:
-        # Real trading minutes: count the bars actually inside each
-        # segment. A weekend or the daily off-session gap contributes
-        # zero bars, so it contributes zero minutes -- exactly right.
-        bar_counts = _bar_counts_per_segment(segments, bars)
-        for seg, count in zip(segments, bar_counts, strict=True):
-            if count == 0:
-                continue  # no bars actually landed here -- nothing to count
-            durations.setdefault(seg.regime, []).append(count * minutes_per_bar)
-    else:
-        # Fallback for callers with no real bars (some unit tests exercise
-        # the aggregation arithmetic on hand-built segments only) --
-        # wall-clock subtraction, which overcounts any segment spanning a
-        # weekend or inter-session gap. Prefer passing `bars`.
-        for seg in segments:
-            end = seg.end_utc if seg.end_utc is not None else history_end_utc
-            if end is None:
-                continue
-            minutes = (end - seg.start_utc).total_seconds() / 60.0
-            durations.setdefault(seg.regime, []).append(minutes)
+    # Real trading minutes when `bars` is given (a weekend or the daily
+    # off-session gap contributes zero bars, so zero minutes -- exactly
+    # right); wall-clock fallback otherwise -- see durations_by_regime.
+    durations = durations_by_regime(
+        segments, history_end_utc=history_end_utc, minutes_per_bar=minutes_per_bar, bars=bars
+    )
 
     grand_total = sum(sum(v) for v in durations.values()) or 1.0
 

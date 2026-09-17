@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
 
+import pytest
+
 from vo.market.bar import Bar
 from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
@@ -20,7 +22,11 @@ from vo.observation.regime import (
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
-from vo.telemetry.regime_report import build_regime_report, build_session_breakdown
+from vo.telemetry.regime_report import (
+    build_regime_report,
+    build_session_breakdown,
+    durations_by_regime,
+)
 from vo.time.sessions import SessionConfig, SessionWindow
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="Test", broker_symbol="US100")
@@ -360,3 +366,31 @@ def test_duration_uses_bar_count_not_wall_clock_when_bars_given() -> None:
     exp_real = with_bars.per_regime[0]
     assert exp_real.total_minutes == 20.0  # only the 20 bars that actually exist
     assert exp_real.share == 1.0  # still the only regime, still 100% of real time
+
+
+def test_durations_by_regime_matches_what_build_regime_report_uses_internally() -> None:
+    """durations_by_regime was extracted out of build_regime_report's own
+    body (a behavior-preserving refactor, v32) so other telemetry
+    (vo.telemetry.regime_validation) can reuse the exact same bar-counted
+    duration accounting rather than re-deriving it. This pins that the
+    extracted function alone reproduces the per-regime totals the full
+    report already reports."""
+    segments = (
+        _seg(RegimeType.CONSOLIDATION, 0, 10),
+        _seg(RegimeType.EXPANSION, 10, 40),
+    )
+    bars = tuple(_bar(m) for m in range(0, 40))
+    durations = durations_by_regime(segments, bars=bars)
+    assert sum(durations[RegimeType.CONSOLIDATION]) == pytest.approx(10.0)
+    assert sum(durations[RegimeType.EXPANSION]) == pytest.approx(30.0)
+
+    report = build_regime_report(
+        segments, (), transitions_log=(), history_end_utc=_at(40), bar_count=40, bars=bars
+    )
+    by_regime = {s.regime: s for s in report.per_regime}
+    assert by_regime[RegimeType.CONSOLIDATION].total_minutes == pytest.approx(
+        sum(durations[RegimeType.CONSOLIDATION])
+    )
+    assert by_regime[RegimeType.EXPANSION].total_minutes == pytest.approx(
+        sum(durations[RegimeType.EXPANSION])
+    )
