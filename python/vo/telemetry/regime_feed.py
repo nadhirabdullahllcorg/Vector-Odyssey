@@ -148,23 +148,46 @@ def build_regime_segments(
         key=lambda row: row[0],
     )
 
+    # Runs are contiguous and chronologically ordered (each run's end ==
+    # the next run's start; the final run's end is None), so one linear
+    # pass over the time-sorted bars with an advancing run-pointer
+    # attributes every bar to exactly one run in O(n + R) total -- the
+    # same tiling-merge-scan pattern already used and verified in
+    # vo.telemetry.regime_report._bar_counts_per_segment. The previous
+    # version re-scanned the FULL bar_view once per run (O(n * R)): fine
+    # at 100k bars, but R grows with n too (more history -> more regime
+    # runs), so this was quietly quadratic and became a real multi-minute
+    # stall once the backtest bar cap was raised to 1,000,000.
+    run_starts = [run[0].observed_at for run in runs]
+    run_ends: list[datetime | None] = [
+        run_starts[i + 1] if i + 1 < len(runs) else None for i in range(len(runs))
+    ]
+    highs_per_run: list[float | None] = [None] * len(runs)
+    lows_per_run: list[float | None] = [None] * len(runs)
+    pos = 0
+    n_runs = len(runs)
+    for t, h, low in bar_view:
+        while pos < n_runs - 1:
+            current_end = run_ends[pos]
+            if current_end is None or t < current_end:
+                break
+            pos += 1
+        start = run_starts[pos]
+        end = run_ends[pos]
+        if t >= start and (end is None or t < end):
+            current_high = highs_per_run[pos]
+            highs_per_run[pos] = h if current_high is None else max(current_high, h)
+            current_low = lows_per_run[pos]
+            lows_per_run[pos] = low if current_low is None else min(current_low, low)
+
     segments: list[RegimeSegment] = []
     for i, run in enumerate(runs):
-        start_utc = run[0].observed_at
-        end_utc = runs[i + 1][0].observed_at if i + 1 < len(runs) else None
+        start_utc = run_starts[i]
+        end_utc = run_ends[i]
         rep = run[-1]  # freshest, non-superseded record of the run
-
-        highs = [
-            h
-            for (t, h, _low) in bar_view
-            if t >= start_utc and (end_utc is None or t < end_utc)
-        ]
-        lows = [
-            low
-            for (t, _h, low) in bar_view
-            if t >= start_utc and (end_utc is None or t < end_utc)
-        ]
-        if not highs or not lows:
+        seg_high = highs_per_run[i]
+        seg_low = lows_per_run[i]
+        if seg_high is None or seg_low is None:
             # Zero-width run (two records at one bar) -- nothing to draw.
             continue
 
@@ -177,8 +200,8 @@ def build_regime_segments(
                 # the indicator extends that band to the live chart edge, which
                 # tracks the current bar more closely than the last fed bar.
                 end_utc=end_utc,
-                high=max(highs),
-                low=min(lows),
+                high=seg_high,
+                low=seg_low,
                 confidence=rep.confidence,
                 anticipated=rep.anticipated_resolution,
                 object_id=rep.object_id,

@@ -172,6 +172,44 @@ def test_empty_states_yield_no_segments() -> None:
     assert build_regime_segments([], bars) == ()
 
 
+def test_segment_bounds_correct_across_more_than_two_runs() -> None:
+    """build_regime_segments walks bar_view once with a single advancing
+    run-pointer (replacing an earlier full-history rescan per run -- see
+    its own comment for why). Four runs of uneven bar counts, several
+    sharing a boundary instant, is enough to catch a pointer left one run
+    behind or advanced one run too far."""
+    bars = [
+        _bar(0, high=10.0, low=9.0),
+        _bar(1, high=11.0, low=9.5),
+        _bar(2, high=20.0, low=15.0),
+        _bar(3, high=30.0, low=25.0),
+        _bar(4, high=32.0, low=24.0),
+        _bar(5, high=31.0, low=26.0),
+        _bar(6, high=40.0, low=39.0),
+    ]
+    states = [
+        _state(RegimeType.CONSOLIDATION, 0),
+        _state(RegimeType.EXPANSION, 2, direction=RegimeDirection.UP),
+        _state(RegimeType.PULLBACK_UNRESOLVED, 3, anticipated=AnticipatedResolution.RETRACEMENT),
+        _state(RegimeType.EXPANSION, 6, direction=RegimeDirection.UP),
+    ]
+    segments = build_regime_segments(states, bars)
+
+    assert [s.regime for s in segments] == [
+        RegimeType.CONSOLIDATION,
+        RegimeType.EXPANSION,
+        RegimeType.PULLBACK_UNRESOLVED,
+        RegimeType.EXPANSION,
+    ]
+    consolidation, first_expansion, pullback, second_expansion = segments
+
+    assert (consolidation.high, consolidation.low) == (11.0, 9.0)  # bars 0,1
+    assert (first_expansion.high, first_expansion.low) == (20.0, 15.0)  # bar 2 only
+    assert (pullback.high, pullback.low) == (32.0, 24.0)  # bars 3,4,5
+    assert second_expansion.end_utc is None
+    assert (second_expansion.high, second_expansion.low) == (40.0, 39.0)  # bar 6 only
+
+
 def test_render_feed_lines_has_header_then_one_line_per_band() -> None:
     states, bars = _scenario()
     segments = build_regime_segments(states, bars)
