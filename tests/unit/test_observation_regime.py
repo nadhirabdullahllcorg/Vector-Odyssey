@@ -171,3 +171,78 @@ def test_machine_runs_and_respects_the_month1_invariants():
 def test_no_lookahead():
     seq = _rise_then_fall_sequence()
     assert_no_lookahead(seq, _make_engine, cutoff=30)
+
+
+# ── _defining_broken: close-required, not a bare wick (the fix this pins) ──
+
+
+def test_defining_broken_requires_a_close_not_a_bare_wick():
+    """Direct check of the exact boundary this fix changes -- a full-tape
+    scenario would only prove *a* reversal happened somewhere, not pin
+    the wick-vs-close distinction itself. Every OTHER transition in this
+    machine already requires a confirmed SwingPoint (K-bar + ATR-filtered)
+    before it fires; this one used to fire on any single wick with zero
+    confirmation. Direction/defining_price are set directly since driving
+    the real SwingEngine to exactly this boundary is what
+    test_machine_runs_and_respects_the_month1_invariants already covers
+    at the integration level."""
+    engine = _make_engine()
+    engine._direction = RegimeDirection.UP
+    engine._defining_price = 100.0
+
+    wick_only = Bar(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        open_time_utc=_T0,
+        open=102.0,
+        high=103.0,
+        low=98.0,  # wick pokes below the defining price...
+        close=101.0,  # ...but the close does not
+        tick_volume=10,
+        real_volume=0,
+    )
+    assert engine._defining_broken(wick_only) is False
+
+    real_break = Bar(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        open_time_utc=_T0,
+        open=102.0,
+        high=103.0,
+        low=98.0,
+        close=99.0,  # the close itself is past the defining price
+        tick_volume=10,
+        real_volume=0,
+    )
+    assert engine._defining_broken(real_break) is True
+
+    # Symmetric for the DOWN direction (defining_price broken from below).
+    engine_down = _make_engine()
+    engine_down._direction = RegimeDirection.DOWN
+    engine_down._defining_price = 100.0
+
+    wick_only_down = Bar(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        open_time_utc=_T0,
+        open=98.0,
+        high=102.0,  # wick pokes above the defining price...
+        low=97.0,
+        close=99.0,  # ...but the close does not
+        tick_volume=10,
+        real_volume=0,
+    )
+    assert engine_down._defining_broken(wick_only_down) is False
+
+    real_break_down = Bar(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        open_time_utc=_T0,
+        open=98.0,
+        high=102.0,
+        low=97.0,
+        close=101.0,
+        tick_volume=10,
+        real_volume=0,
+    )
+    assert engine_down._defining_broken(real_break_down) is True

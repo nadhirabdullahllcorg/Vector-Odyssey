@@ -315,11 +315,22 @@ class RegimeEngine:
         )
 
     def _defining_broken(self, current: Bar) -> bool:
+        """[VO-D]. Month 1 Lesson 1 defines REVERSAL as "the defining swing
+        broken" but never specifies wick vs close -- that operational
+        choice is VO's own, not ICT's. A close is required, not a bare
+        wick touch: every OTHER transition in this machine already
+        requires a confirmed SwingPoint (K-bar + ATR-magnitude filtered,
+        see vo.observation.swings) before it fires, but this one check
+        used to fire on a single tick of intrabar noise poking past the
+        level, with no confirmation of any kind -- a real asymmetry, not
+        a deliberate one, and the most likely source of a regime flipping
+        (and reversing direction) far faster than the rest of the state
+        machine's own deliberately conservative thresholds would suggest."""
         if self._defining_price is None:
             return False
         if self._direction is RegimeDirection.UP:
-            return current.low < self._defining_price
-        return current.high > self._defining_price
+            return current.close < self._defining_price
+        return current.close > self._defining_price
 
     # ── state machine ───────────────────────────────────────────────────
 
