@@ -24,6 +24,7 @@ from vo.observation.regime import (
     RegimeTransition,
     RegimeType,
 )
+from vo.research.transitions import build_transition_matrix
 from vo.telemetry.regime_feed import build_regime_segments
 from vo.telemetry.regime_report import durations_by_regime
 from vo.telemetry.regime_validation import (
@@ -31,7 +32,6 @@ from vo.telemetry.regime_validation import (
     build_duration_distributions,
     build_evidence_comparison,
     build_period_breakdown,
-    build_transition_matrix,
     render_validation_report_markdown,
 )
 from vo.time.sessions import SessionConfig, SessionWindow

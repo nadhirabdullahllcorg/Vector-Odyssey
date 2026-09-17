@@ -94,6 +94,7 @@ from vo.research.statistics import (  # noqa: E402
     build_out_of_sample_report,
     build_window_distributions,
 )
+from vo.research.transitions import build_transition_matrix  # noqa: E402
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
     build_regime_segments,
@@ -110,7 +111,6 @@ from vo.telemetry.regime_validation import (  # noqa: E402
     build_duration_distributions,
     build_evidence_comparison,
     build_period_breakdown,
-    build_transition_matrix,
     render_validation_report_markdown,
 )
 from vo.time.brokers import load_broker_profiles, resolve_broker_utc  # noqa: E402

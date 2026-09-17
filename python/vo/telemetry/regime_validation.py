@@ -68,7 +68,6 @@ NOT a substitute for holding out data after tuning starts.
 from __future__ import annotations
 
 import statistics
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,6 +82,7 @@ from vo.research.statistics import (
     percentile,
     wilson_score_interval,
 )
+from vo.research.transitions import TransitionMatrix
 from vo.telemetry.regime_feed import RegimeSegment
 from vo.telemetry.regime_report import RegimeReport, build_regime_report
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
@@ -162,38 +162,6 @@ def build_period_breakdown(
 
 
 # ── 2. transition matrix ─────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class TransitionMatrix:
-    """The full from/to grid (all five regimes, both axes), not just the
-    "most frequent first" flat list regime_report already renders --
-    including the zero cells, since "this never happens" is itself part
-    of validating the Month 1 transition-structure constraint (see
-    vo-phase-plan.md's §13-notes: CONSOLIDATION should never transition
-    directly into RETRACEMENT/REVERSAL, for example -- a matrix makes
-    that either visibly true or visibly violated, a flat list does not)."""
-
-    counts: dict[tuple[RegimeType, RegimeType], int]
-    row_totals: dict[RegimeType, int]
-
-    def probability(self, frm: RegimeType, to: RegimeType) -> float | None:
-        """P(next state = to | current state = frm), or None if `frm`
-        never occurred as a transition source in this run (no denominator)."""
-        total = self.row_totals.get(frm, 0)
-        if not total:
-            return None
-        return self.counts.get((frm, to), 0) / total
-
-
-def build_transition_matrix(transitions_log: Sequence[RegimeTransition]) -> TransitionMatrix:
-    counts: dict[tuple[RegimeType, RegimeType], int] = Counter(
-        (t.from_state, t.to_state) for t in transitions_log
-    )
-    row_totals: dict[RegimeType, int] = Counter()
-    for (frm, _to), n in counts.items():
-        row_totals[frm] += n
-    return TransitionMatrix(counts=dict(counts), row_totals=dict(row_totals))
 
 
 # ── 3. duration distributions ────────────────────────────────────────────

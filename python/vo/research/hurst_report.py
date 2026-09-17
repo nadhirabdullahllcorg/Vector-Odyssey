@@ -87,7 +87,6 @@ period-breakdown approximations.
 
 from __future__ import annotations
 
-import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,6 +104,7 @@ from vo.research.statistics import (
     describe,
     mann_whitney_u,
 )
+from vo.research.transitions import nearest_sample_before
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
 
 DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (10, 20, 40, 80)
@@ -239,16 +239,14 @@ def build_hurst_preceding_transitions(
     the market resolved into this regime." Skips a transition when its
     nearest earlier sample is more than `max_gap_minutes` away (a real
     data gap, e.g. a weekend, rather than a stale match)."""
-    sample_times = [t for t, _v in samples]
     out: dict[RegimeType, list[float]] = {}
     for transition in transitions_log:
-        idx = bisect.bisect_right(sample_times, transition.observed_at) - 1
-        if idx < 0:
+        found = nearest_sample_before(
+            samples, transition.observed_at, max_gap_minutes=max_gap_minutes
+        )
+        if found is None:
             continue
-        when, value = samples[idx]
-        gap_minutes = (transition.observed_at - when).total_seconds() / 60.0
-        if gap_minutes < 0 or gap_minutes > max_gap_minutes:
-            continue
+        _when, value = found
         out.setdefault(transition.to_state, []).append(value)
     return out
 
