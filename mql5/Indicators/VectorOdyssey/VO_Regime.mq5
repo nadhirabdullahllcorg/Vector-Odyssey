@@ -20,22 +20,39 @@
 //| feed and paints it. If a band looks wrong, the bug is in the       |
 //| Python engine or the feed, never here.                            |
 //|                                                                  |
-//| FEED FORMAT (vo.telemetry.regime_feed, v1). Lines beginning '#'    |
-//| are provenance comments and are skipped. Every other line is nine  |
-//| pipe-delimited fields:                                            |
-//|   object_id | regime | direction | start_epoch | end_epoch |       |
-//|   high | low | confidence | anticipated                           |
+//| FEED FORMAT (vo.telemetry.regime_feed, v2). Lines beginning '#'    |
+//| are provenance comments and are skipped. Every other line's FIRST  |
+//| field is a tag, "BAND" or "MARK", so the two can never be confused |
+//| even by field count alone:                                        |
+//|                                                                  |
+//|   BAND | object_id | regime | direction | start_epoch | end_epoch |
+//|        | high | low | confidence | anticipated   (10 fields)      |
+//|   MARK | object_id | regime | direction | at_epoch | price |       |
+//|        confidence                        (7 fields)                |
+//|                                                                  |
 //| - object_id: the real RegimeState.object_id (gate G8: the chart    |
-//|   object embeds it, so any band is traceable to one canonical      |
-//|   record on the Python side).                                     |
+//|   object embeds it, so any band/marker is traceable to one          |
+//|   canonical record on the Python side).                            |
 //| - direction: UP / DOWN / NONE.                                    |
-//| - start_epoch / end_epoch: broker-SERVER epoch seconds (what MT5   |
-//|   chart time uses). end_epoch 0 means the band is still current -- |
-//|   it is extended to the latest chart bar so it tracks the live     |
-//|   edge instead of freezing at the last published bar.             |
-//| - high / low: the band's vertical extent (the segment's bars).    |
+//| - start_epoch / end_epoch / at_epoch: broker-SERVER epoch seconds   |
+//|   (what MT5 chart time uses). A band's end_epoch 0 means it is     |
+//|   still current -- extended to the latest chart bar so it tracks   |
+//|   the live edge instead of freezing at the last published bar.    |
+//| - high / low: a band's vertical extent (its own bars' range).      |
+//| - price: a marker's single price (the resolving bar's close --     |
+//|   RETRACEMENT/REVERSAL are instantaneous, so there is no bar range  |
+//|   to bound a high/low with).                                       |
 //| - anticipated: RETRACEMENT / REVERSAL / UNCLEAR / empty -- only    |
 //|   ever set on a PULLBACK_UNRESOLVED band (the [VO-H] lean).        |
+//|                                                                  |
+//| WHY MARKERS EXIST. RETRACEMENT/REVERSAL are not periods the market  |
+//| spends time in -- the engine resolves an ambiguous pullback and     |
+//| re-enters EXPANSION in the SAME bar (regime.py: "... -> RETRACEMENT |
+//| -> EXPANSION"). That run has zero width, so build_regime_segments   |
+//| correctly drops it rather than draw a degenerate band -- but the    |
+//| moment itself (the single most decision-relevant instant in the     |
+//| whole model: exactly where an ambiguous pullback got resolved) is   |
+//| still worth seeing. A MARK line draws a small arrow there instead.  |
 //|                                                                  |
 //| SCOPE: a Custom Indicator, not an Expert Advisor -- same reasoning |
 //| as VO_ReferenceLevels.mq5 / VO_Swings.mq5: indicators have no      |
@@ -67,8 +84,15 @@
 
 //--- Object naming/versioning -- same "bump on breaking change" rule as
 //    VO_SWG_PREFIX in VO_Swings.mq5 / VO_REF_PREFIX in VO_ReferenceLevels.mq5.
-#define VO_RGM_PREFIX "VO_RGM_v1"
-#define VO_FEED_FIELDS 9
+//    v1 -> v2: feed format gained the BAND/MARK tag and resolution markers;
+//    old v1 chart objects are orphaned by this prefix bump, same as any
+//    other breaking change here -- remove/re-add the indicator once to
+//    clear them.
+#define VO_RGM_PREFIX "VO_RGM_v2"
+#define VO_TAG_BAND "BAND"
+#define VO_TAG_MARK "MARK"
+#define VO_FEED_BAND_FIELDS 10
+#define VO_FEED_MARKER_FIELDS 7
 
 input group "=== Feed source (MQL5\\Files\\<subdir>\\<symbol>_regime.feed) ==="
 input string InpFeedSubdir     = "VectorOdyssey"; // must match VO_Bridge InpOutputSubdir / vo_ea.yaml wire.dir
@@ -90,6 +114,11 @@ input bool   InpFillBands = true;   // filled band behind price (false = outline
 input int    InpLineWidth = 1;
 input int    InpFontSize  = 7;
 input color  InpLabelColor = clrDimGray;
+
+input group "=== Resolution markers (RETRACEMENT/REVERSAL confirm instants) ==="
+input int    InpRetracementArrowCode = 159;  // wingdings code, RETRACEMENT (continuation) -- small filled dot
+input int    InpReversalArrowCode    = 108;  // wingdings code, REVERSAL (structure shift) -- more prominent
+input int    InpMarkerSize           = 2;
 
 //--- Re-read bookkeeping (same pattern as VO_Swings.mq5's g_last_seen_bar_open).
 datetime g_last_seen_bar_open = 0;
@@ -189,11 +218,22 @@ void VO_ReadAndDraw()
 
       string f[];
       const int n = StringSplit(line, '|', f);
-      if(n != VO_FEED_FIELDS)
-         continue; // format drift / half line -- skip defensively
+      if(n < 1)
+         continue; // empty/malformed line -- skip defensively
 
-      VO_DrawBand(f, live_edge, drawn);
-      drawn++;
+      if(f[0] == VO_TAG_BAND && n == VO_FEED_BAND_FIELDS)
+        {
+         VO_DrawBand(f, live_edge, drawn);
+         drawn++;
+        }
+      else if(f[0] == VO_TAG_MARK && n == VO_FEED_MARKER_FIELDS)
+        {
+         VO_DrawMarker(f, drawn);
+         drawn++;
+        }
+      // else: unrecognized tag or field-count drift -- skip defensively,
+      // same "the bug is in the Python engine or the feed, never here"
+      // discipline as everywhere else in this file.
      }
 
    FileClose(handle);
@@ -207,15 +247,16 @@ void VO_ReadAndDraw()
 //+------------------------------------------------------------------+
 void VO_DrawBand(const string &f[], const datetime live_edge, const int ordinal)
   {
-   const string object_id   = f[0];
-   const string regime      = f[1];
-   const string direction   = f[2];
-   const datetime start_t   = (datetime)StringToInteger(f[3]);
-   const long   end_epoch   = StringToInteger(f[4]);
-   const double high        = StringToDouble(f[5]);
-   const double low         = StringToDouble(f[6]);
-   const double confidence  = StringToDouble(f[7]);
-   const string anticipated = f[8];
+   // f[0] is the "BAND" tag (already checked by the caller).
+   const string object_id   = f[1];
+   const string regime      = f[2];
+   const string direction   = f[3];
+   const datetime start_t   = (datetime)StringToInteger(f[4]);
+   const long   end_epoch   = StringToInteger(f[5]);
+   const double high        = StringToDouble(f[6]);
+   const double low         = StringToDouble(f[7]);
+   const double confidence  = StringToDouble(f[8]);
+   const string anticipated = f[9];
 
    const datetime end_t = (end_epoch == 0) ? live_edge : (datetime)end_epoch;
    const color clr = VO_RegimeColor(regime);
@@ -261,6 +302,69 @@ void VO_DrawBand(const string &f[], const datetime live_edge, const int ordinal)
    ObjectSetDouble(0, label_name, OBJPROP_PRICE, 0, high);
    ObjectSetString(0, label_name, OBJPROP_TEXT, label_text);
    ObjectSetInteger(0, label_name, OBJPROP_COLOR, InpLabelColor);
+  }
+
+//+------------------------------------------------------------------+
+//| Draw one resolution marker from six already-split MARK fields.    |
+//| RETRACEMENT/REVERSAL are instantaneous (see the file header's      |
+//| WHY MARKERS EXIST note) -- one arrow at one bar/price, not a band.  |
+//| REVERSAL is drawn larger/more prominent than RETRACEMENT: a         |
+//| structure shift is a bigger deal than a trend continuing.          |
+//+------------------------------------------------------------------+
+void VO_DrawMarker(const string &f[], const int ordinal)
+  {
+   // f[0] is the "MARK" tag (already checked by the caller).
+   const string object_id  = f[1];
+   const string regime     = f[2]; // RETRACEMENT or REVERSAL
+   const string direction  = f[3];
+   const datetime at_t     = (datetime)StringToInteger(f[4]);
+   const double price      = StringToDouble(f[5]);
+   const double confidence = StringToDouble(f[6]);
+
+   const bool is_reversal   = (regime == "REVERSAL");
+   const color clr          = is_reversal ? InpColorReversal : InpColorRetracement;
+   const int   arrow_code   = is_reversal ? InpReversalArrowCode : InpRetracementArrowCode;
+   const int   arrow_size   = is_reversal ? InpMarkerSize + 1 : InpMarkerSize;
+
+   const string name = StringFormat("%s|MARK|%d|%s|%d", VO_RGM_PREFIX, ordinal, regime, (long)at_t);
+
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_ARROW, 0, at_t, price);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_TIME, 0, at_t);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, 0, price);
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, arrow_code);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, arrow_size);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_CENTER);
+
+   const string dir_text = (direction == "NONE") ? "" : (" " + direction);
+   const string tooltip = StringFormat(
+      "VO Regime resolution: %s%s\nconfidence: %s\nid: %s",
+      regime, dir_text, DoubleToString(confidence, 2), object_id);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
+
+   // Small text label, same convention as VO_DrawBand's -- readable
+   // without hovering. REVERSAL labels sit above the price, RETRACEMENT
+   // below, so the two never overlap when they land close together.
+   const string label_name = name + "|lbl";
+   const string label_text = regime + dir_text;
+   if(ObjectFind(0, label_name) < 0)
+     {
+      ObjectCreate(0, label_name, OBJ_TEXT, 0, at_t, price);
+      ObjectSetInteger(0, label_name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, label_name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, label_name, OBJPROP_ANCHOR,
+                        is_reversal ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, InpFontSize);
+     }
+   ObjectSetInteger(0, label_name, OBJPROP_TIME, 0, at_t);
+   ObjectSetDouble(0, label_name, OBJPROP_PRICE, 0, price);
+   ObjectSetString(0, label_name, OBJPROP_TEXT, label_text);
+   ObjectSetInteger(0, label_name, OBJPROP_COLOR, clr);
   }
 
 //+------------------------------------------------------------------+
