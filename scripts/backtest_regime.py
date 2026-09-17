@@ -2,12 +2,22 @@
 """
 Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
-    python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] [--validate]
+    python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] \
+        [--validate] [--hurst-report]
 
 --validate additionally builds a Regime Engine Validation Report v1
 (vo.telemetry.regime_validation) from the SAME in-memory replay -- no
 second MT5 pull, no second engine run -- and writes
 regime_validation_<symbol>.md alongside the plain backtest report.
+
+--hurst-report additionally builds Phase 15a's standalone Hurst
+characterization report (vo.research.hurst_report) from the SAME
+in-memory replay -- rolling distribution/window-length sensitivity,
+by regime, preceding transitions, by session, out-of-sample -- and
+writes hurst_report_<symbol>.md. Independent of --validate; either or
+both may be passed. Samples on a stride (not every bar) since
+hurst_exponent's cost grows with the window length -- see the module's
+own docstring for why.
 
 The live publisher (scripts/publish_regime.py) only ever sees the ~500
 bars VO_Bridge backfills -- a short runway. This pulls a MUCH longer M1
@@ -50,6 +60,18 @@ from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
+from vo.research.hurst_report import (  # noqa: E402
+    DEFAULT_STRIDE,
+    DEFAULT_WINDOW_LENGTHS,
+    RegimeInterval,
+    build_hurst_by_regime_report,
+    build_hurst_by_session,
+    build_out_of_sample_report,
+    build_rolling_hurst,
+    build_transition_hurst_report,
+    build_window_distributions,
+    render_hurst_report_markdown,
+)
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
     build_regime_segments,
@@ -84,10 +106,11 @@ REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int, bool]:
+def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
     validate = False
+    hurst_report = False
     rest = []
     i = 0
     while i < len(argv):
@@ -97,12 +120,15 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool]:
         elif argv[i] == "--validate":
             validate = True
             i += 1
+        elif argv[i] == "--hurst-report":
+            hurst_report = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
     if rest:
         config_path = rest[0]
-    return config_path, bars, validate
+    return config_path, bars, validate, hurst_report
 
 
 def _write_feed_atomic(out_path: Path, text: str) -> None:
@@ -120,7 +146,7 @@ def _write_feed_atomic(out_path: Path, text: str) -> None:
 
 
 def main() -> None:
-    config_path, bar_cap, validate = _parse_args(sys.argv[1:])
+    config_path, bar_cap, validate, hurst_report = _parse_args(sys.argv[1:])
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
@@ -278,6 +304,53 @@ def main() -> None:
             f"  -> validation report built in {time.monotonic() - _t_validate:.1f}s", flush=True
         )
 
+    hurst_report_path: Path | None = None
+    if hurst_report:
+        print("building Hurst research report (Phase 15a)...", flush=True)
+        _t_hurst = time.monotonic()
+        # always sample the configured hurst_period too, even if it isn't
+        # one of the default sweep values, so the "primary window" tables
+        # are never silently empty
+        hurst_window_lengths = tuple(
+            sorted({*DEFAULT_WINDOW_LENGTHS, regime_config.hurst_period})
+        )
+        rolling = build_rolling_hurst(sequence.bars, window_lengths=hurst_window_lengths)
+        window_dists = build_window_distributions(rolling, window_lengths=hurst_window_lengths)
+        intervals = tuple(
+            RegimeInterval(regime=seg.regime, start_utc=seg.start_utc, end_utc=seg.end_utc)
+            for seg in segments
+        )
+        by_regime = build_hurst_by_regime_report(
+            rolling,
+            intervals,
+            window_lengths=hurst_window_lengths,
+            primary_window=regime_config.hurst_period,
+        )
+        transitions = build_transition_hurst_report(
+            rolling.get(regime_config.hurst_period, []), transitions_log, max_gap_minutes=90.0
+        )
+        by_session = (
+            build_hurst_by_session(rolling.get(regime_config.hurst_period, []), session_config)
+            if session_config is not None
+            else ()
+        )
+        out_of_sample = build_out_of_sample_report(rolling, window_lengths=hurst_window_lengths)
+        hurst_markdown = render_hurst_report_markdown(
+            instrument_key=config.broker_symbol,
+            timeframe_canonical="M1",
+            generated_utc=datetime.now(UTC),
+            primary_window=regime_config.hurst_period,
+            stride=DEFAULT_STRIDE,
+            window_distributions=window_dists,
+            by_regime=by_regime,
+            transitions=transitions,
+            by_session=by_session,
+            out_of_sample=out_of_sample,
+        )
+        hurst_report_path = REPO_ROOT / f"hurst_report_{config.broker_symbol}.md"
+        hurst_report_path.write_text(hurst_markdown, encoding="utf-8")
+        print(f"  -> Hurst report built in {time.monotonic() - _t_hurst:.1f}s", flush=True)
+
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
     coverage_pct = (trading_days / calendar_days * 100.0) if calendar_days > 0 else 100.0
@@ -298,6 +371,8 @@ def main() -> None:
     print(f"report written:   {report_path}")
     if validation_report_path is not None:
         print(f"validation report written: {validation_report_path}")
+    if hurst_report_path is not None:
+        print(f"Hurst report written: {hurst_report_path}")
     print()
     print(markdown)
 
