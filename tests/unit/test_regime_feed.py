@@ -20,8 +20,10 @@ from vo.observation.regime import (
 )
 from vo.telemetry.regime_feed import (
     FEED_DELIMITER,
+    build_regime_markers,
     build_regime_segments,
     feed_line,
+    marker_line,
     render_feed_lines,
 )
 
@@ -178,16 +180,19 @@ def test_render_feed_lines_has_header_then_one_line_per_band() -> None:
     )
     assert lines[0].startswith("#")
     assert "segments=4" in lines[0]
+    assert "markers=0" in lines[0]  # this scenario's lone RETRACEMENT is open-ended, not dropped
     assert len(lines) == 1 + len(segments)
 
-    # Each band line: 9 delimited fields.
+    # Each band line: a "BAND" tag then 9 delimited fields (10 total).
     for line in lines[1:]:
-        assert len(line.split(FEED_DELIMITER)) == 9
+        fields = line.split(FEED_DELIMITER)
+        assert fields[0] == "BAND"
+        assert len(fields) == 10
 
     # The open-ended final band carries end_epoch 0.
     last = lines[-1].split(FEED_DELIMITER)
-    assert last[1] == "RETRACEMENT"
-    assert last[4] == "0"
+    assert last[2] == "RETRACEMENT"
+    assert last[5] == "0"
 
 
 def test_feed_line_encodes_absent_direction_and_anticipation() -> None:
@@ -197,8 +202,9 @@ def test_feed_line_encodes_absent_direction_and_anticipation() -> None:
     consolidation = segments[0]  # no direction, no anticipation
     line = feed_line(consolidation, start_epoch=10, end_epoch=20)
     fields = line.split(FEED_DELIMITER)
-    assert fields[2] == "NONE"  # direction
-    assert fields[8] == ""  # anticipated
+    assert fields[0] == "BAND"
+    assert fields[3] == "NONE"  # direction
+    assert fields[9] == ""  # anticipated
 
 
 def test_feed_line_rejects_object_id_containing_the_delimiter() -> None:
@@ -220,3 +226,103 @@ def test_feed_line_rejects_object_id_containing_the_delimiter() -> None:
     )
     with pytest.raises(ValueError, match="delimiter"):
         feed_line(poisoned, start_epoch=1, end_epoch=2)
+
+
+def _resolution_scenario() -> tuple[list[RegimeState], list[Bar]]:
+    """EXPANSION -> PULLBACK_UNRESOLVED -> RETRACEMENT, with the
+    RETRACEMENT immediately followed (same bar) by a new EXPANSION --
+    the real production shape (RegimeEngine._resolve_retracement emits
+    both in the same on_bar call). The RETRACEMENT run is zero-width
+    (its own start_utc == the following EXPANSION run's start_utc) and
+    must be dropped as a segment but still produce a marker."""
+    bars = [
+        _bar(0, high=100.0, low=99.0),
+        _bar(1, high=101.0, low=99.5),
+        _bar(2, high=104.0, low=100.5),  # the resolving bar
+        _bar(3, high=107.0, low=103.0),  # new expansion continues
+    ]
+    states = [
+        _state(RegimeType.EXPANSION, 0, direction=RegimeDirection.UP),
+        _state(RegimeType.PULLBACK_UNRESOLVED, 1),
+        _state(
+            RegimeType.RETRACEMENT,
+            2,
+            direction=RegimeDirection.UP,
+            confidence=1.0,
+            supersedes="US100:M1:REGIME:PULLBACK_UNRESOLVED:1",
+        ),
+        _state(RegimeType.EXPANSION, 2, direction=RegimeDirection.UP, suffix="b"),
+    ]
+    return states, bars
+
+
+def test_build_regime_markers_emits_one_per_retracement_reversal_state() -> None:
+    states, bars = _resolution_scenario()
+
+    segments = build_regime_segments(states, bars)
+    markers = build_regime_markers(states, bars)
+
+    # The RETRACEMENT run is zero-width (shares its start with the very
+    # next EXPANSION run) and correctly dropped as a segment...
+    assert RegimeType.RETRACEMENT not in [s.regime for s in segments]
+    # ...but it still produced a marker, priced at its own bar's close.
+    assert len(markers) == 1
+    marker = markers[0]
+    assert marker.regime is RegimeType.RETRACEMENT
+    assert marker.at_utc == _at(2)
+    assert marker.price == bars[2].close
+    assert marker.object_id == "US100:M1:REGIME:RETRACEMENT:2"
+
+
+def test_marker_line_format_and_delimiter_guard() -> None:
+    states, bars = _resolution_scenario()
+    marker = build_regime_markers(states, bars)[0]
+
+    line = marker_line(marker, at_epoch=42)
+    fields = line.split(FEED_DELIMITER)
+    assert fields[0] == "MARK"
+    assert len(fields) == 7
+    assert fields[2] == "RETRACEMENT"
+    assert fields[3] == "UP"
+    assert fields[4] == "42"
+
+    poisoned = type(marker)(
+        regime=marker.regime,
+        direction=marker.direction,
+        at_utc=marker.at_utc,
+        price=marker.price,
+        confidence=marker.confidence,
+        object_id=f"bad{FEED_DELIMITER}id",
+        methodology_version=marker.methodology_version,
+        instrument_key=marker.instrument_key,
+        timeframe_canonical=marker.timeframe_canonical,
+    )
+    with pytest.raises(ValueError, match="delimiter"):
+        marker_line(poisoned, at_epoch=1)
+
+
+def test_render_feed_lines_tags_and_counts_bands_and_markers_separately() -> None:
+    states, bars = _resolution_scenario()
+    segments = build_regime_segments(states, bars)
+    markers = build_regime_markers(states, bars)
+
+    lines = render_feed_lines(
+        segments,
+        markers,
+        epoch_of=lambda dt: int(dt.timestamp()),
+        generated_utc=datetime(2026, 1, 1, 0, 4, tzinfo=UTC),
+    )
+    assert f"segments={len(segments)}" in lines[0]
+    assert f"markers={len(markers)}" in lines[0]
+    assert len(lines) == 1 + len(segments) + len(markers)
+
+    tags = [line.split(FEED_DELIMITER)[0] for line in lines[1:]]
+    assert tags.count("BAND") == len(segments)
+    assert tags.count("MARK") == len(markers)
+    # A marker line can never be mistaken for a band even by field count.
+    for line in lines[1:]:
+        fields = line.split(FEED_DELIMITER)
+        if fields[0] == "MARK":
+            assert len(fields) == 7
+        else:
+            assert len(fields) == 10

@@ -39,6 +39,22 @@ carries broker-server epoch seconds, produced by the caller's
 `epoch_of` (scripts/publish_regime.py maps UTC back to the broker-local
 wall-clock the bridge captured). This module never guesses that mapping
 -- it is handed one, exactly as generate_swing_reference.py is.
+
+MARKERS (v2). RETRACEMENT/REVERSAL are not periods the market spends
+time in -- the engine resolves an ambiguous pullback and re-enters
+EXPANSION in the SAME bar (see vo.observation.regime's module
+docstring: "... -> RETRACEMENT -> EXPANSION"). A run of exactly one such
+record has start_utc == the very next run's start_utc, so it has no
+bars in [start_utc, end_utc) to bound a band with -- build_regime_segments
+correctly drops it rather than draw a degenerate zero-width rectangle.
+That does not mean the moment should be invisible: it is the single
+instant the [VO-H] anticipation lean gets checked against reality.
+build_regime_markers() emits a point event for each one instead of a
+band -- one bar, one price (that bar's close), one RegimeState it traces
+back to (gate G8). Every feed line (band or marker) now starts with an
+explicit "BAND"/"MARK" tag rather than relying on field-count alone to
+tell them apart -- the field count still differs too, but the tag is
+the primary, more robust discriminant on the MQL5 side.
 """
 
 from __future__ import annotations
@@ -55,7 +71,7 @@ from vo.observation.regime import (
     RegimeType,
 )
 
-FEED_VERSION = 1
+FEED_VERSION = 2
 FEED_DELIMITER = "|"
 _COMMENT_PREFIX = "#"
 
@@ -161,29 +177,96 @@ def build_regime_segments(
     return tuple(segments)
 
 
+@dataclass(frozen=True)
+class RegimeMarker:
+    """One instantaneous resolution event (RETRACEMENT or REVERSAL) --
+    see the module docstring's MARKERS section for why this exists
+    alongside RegimeSegment rather than as a zero-width one. Anchored at
+    the bar matching the source RegimeState's observed_at; priced at that
+    bar's close (always present, unlike a band's high/low which need a
+    bar range to bound). object_id/confidence trace back to the real
+    RegimeState (gate G8); direction is that record's direction."""
+
+    regime: RegimeType
+    direction: RegimeDirection | None
+    at_utc: datetime
+    price: float
+    confidence: float
+    object_id: str
+    methodology_version: int
+    instrument_key: str
+    timeframe_canonical: str
+
+
+def build_regime_markers(
+    states: Sequence[RegimeState],
+    bars: Sequence[Bar],
+) -> tuple[RegimeMarker, ...]:
+    """One RegimeMarker per RETRACEMENT/REVERSAL state -- the resolution
+    instants build_regime_segments necessarily drops (see its own
+    docstring's zero-width-run note). `bars` is used only to look up the
+    price at each resolution's bar; a state whose observed_at does not
+    match any bar's open_time_utc is skipped rather than given an
+    invented price (should not happen -- observed_at is always set from
+    a real bar's open_time_utc by RegimeEngine._emit_state)."""
+    bar_by_open_time = {b.open_time_utc: b for b in bars}
+    markers: list[RegimeMarker] = []
+    for state in states:
+        if state.regime not in (RegimeType.RETRACEMENT, RegimeType.REVERSAL):
+            continue
+        bar = bar_by_open_time.get(state.observed_at)
+        if bar is None:
+            continue
+        markers.append(
+            RegimeMarker(
+                regime=state.regime,
+                direction=state.direction,
+                at_utc=state.observed_at,
+                price=bar.close,
+                confidence=state.confidence,
+                object_id=state.object_id,
+                methodology_version=state.methodology_version,
+                instrument_key=state.instrument_id.key,
+                timeframe_canonical=state.timeframe.canonical,
+            )
+        )
+    return tuple(markers)
+
+
+_BAND_TAG = "BAND"
+_MARK_TAG = "MARK"
+
+
 def feed_header(
     segments: Sequence[RegimeSegment],
+    markers: Sequence[RegimeMarker] = (),
     *,
     generated_utc: datetime,
 ) -> str:
     """A single comment line the indicator skips -- provenance only."""
-    instrument = segments[0].instrument_key if segments else "?"
-    timeframe = segments[0].timeframe_canonical if segments else "?"
+    instrument = segments[0].instrument_key if segments else (
+        markers[0].instrument_key if markers else "?"
+    )
+    timeframe = segments[0].timeframe_canonical if segments else (
+        markers[0].timeframe_canonical if markers else "?"
+    )
     return (
         f"{_COMMENT_PREFIX} VO_REGIME_FEED v{FEED_VERSION} "
         f"instrument={instrument} timeframe={timeframe} "
-        f"generated_utc={generated_utc.isoformat()} segments={len(segments)}"
+        f"generated_utc={generated_utc.isoformat()} "
+        f"segments={len(segments)} markers={len(markers)}"
     )
 
 
 def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> str:
-    """One pipe-delimited band line: nine fields, MQL5-parseable.
+    """One pipe-delimited band line: a "BAND" tag then nine fields (ten
+    total), MQL5-parseable.
 
-    Fields: object_id | regime | direction | start_epoch | end_epoch |
-    high | low | confidence | anticipated. `direction` is NONE when
-    absent, `anticipated` is empty when absent, `end_epoch` is 0 for the
-    open-ended final band. Broker-server epoch seconds are supplied by
-    the caller; this module never converts time itself.
+    Fields: BAND | object_id | regime | direction | start_epoch |
+    end_epoch | high | low | confidence | anticipated. `direction` is
+    NONE when absent, `anticipated` is empty when absent, `end_epoch` is
+    0 for the open-ended final band. Broker-server epoch seconds are
+    supplied by the caller; this module never converts time itself.
     """
     if FEED_DELIMITER in segment.object_id:
         raise ValueError(
@@ -193,6 +276,7 @@ def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> st
     direction = segment.direction.name if segment.direction is not None else "NONE"
     anticipated = segment.anticipated.name if segment.anticipated is not None else ""
     fields = [
+        _BAND_TAG,
         segment.object_id,
         segment.regime.name,
         direction,
@@ -206,22 +290,62 @@ def feed_line(segment: RegimeSegment, *, start_epoch: int, end_epoch: int) -> st
     return FEED_DELIMITER.join(fields)
 
 
+def marker_line(marker: RegimeMarker, *, at_epoch: int) -> str:
+    """One pipe-delimited marker line: a "MARK" tag then six fields
+    (seven total) -- deliberately fewer fields than a band line (and a
+    different tag), so a marker can never be mistaken for one even by a
+    parser that only counts fields.
+
+    Fields: MARK | object_id | regime | direction | at_epoch | price |
+    confidence. `regime` is always RETRACEMENT or REVERSAL (see
+    build_regime_markers).
+    """
+    if FEED_DELIMITER in marker.object_id:
+        raise ValueError(
+            f"object_id {marker.object_id!r} contains the feed delimiter "
+            f"{FEED_DELIMITER!r} -- would corrupt the line"
+        )
+    direction = marker.direction.name if marker.direction is not None else "NONE"
+    fields = [
+        _MARK_TAG,
+        marker.object_id,
+        marker.regime.name,
+        direction,
+        str(at_epoch),
+        repr(marker.price),
+        repr(marker.confidence),
+    ]
+    return FEED_DELIMITER.join(fields)
+
+
 def render_feed_lines(
     segments: Sequence[RegimeSegment],
+    markers: Sequence[RegimeMarker] = (),
     *,
     epoch_of: Callable[[datetime], int],
     generated_utc: datetime,
 ) -> list[str]:
-    """Full feed content: one provenance header then one line per band.
+    """Full feed content: one provenance header, then one line per band
+    or marker, in chronological order (bands and markers interleaved by
+    their own time so the file reads sensibly top to bottom).
 
     `epoch_of` maps a resolved UTC instant to the broker-server epoch
     seconds MT5 draws in (the identity `int(dt.timestamp())` is fine for
     tests that don't care about broker offset). The open-ended final band
     emits end_epoch 0.
     """
-    lines = [feed_header(segments, generated_utc=generated_utc)]
+    lines = [feed_header(segments, markers, generated_utc=generated_utc)]
+
+    events: list[tuple[datetime, str]] = []
     for segment in segments:
         start_epoch = epoch_of(segment.start_utc)
         end_epoch = epoch_of(segment.end_utc) if segment.end_utc is not None else 0
-        lines.append(feed_line(segment, start_epoch=start_epoch, end_epoch=end_epoch))
+        events.append(
+            (segment.start_utc, feed_line(segment, start_epoch=start_epoch, end_epoch=end_epoch))
+        )
+    for marker in markers:
+        events.append((marker.at_utc, marker_line(marker, at_epoch=epoch_of(marker.at_utc))))
+    events.sort(key=lambda pair: pair[0])
+
+    lines.extend(line for _when, line in events)
     return lines

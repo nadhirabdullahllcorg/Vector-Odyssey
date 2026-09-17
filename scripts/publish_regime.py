@@ -53,7 +53,11 @@ from vo.market.sequence import BarSequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
-from vo.telemetry.regime_feed import build_regime_segments, render_feed_lines  # noqa: E402
+from vo.telemetry.regime_feed import (  # noqa: E402
+    build_regime_markers,
+    build_regime_segments,
+    render_feed_lines,
+)
 from vo.time.brokers import BrokerProfile, load_broker_profiles, resolve_broker_utc  # noqa: E402
 
 SWINGS_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "swings.yaml"
@@ -164,7 +168,12 @@ def build_feed_lines(config: EAConfig) -> list[str]:
     engine = build_regime_engine(regime_config, swing_config, tick_size=tick_size)
     ReplayHarness(sequence).run(engine)
 
-    segments = build_regime_segments(engine.states.all(), sequence.bars)
+    states = engine.states.all()
+    segments = build_regime_segments(states, sequence.bars)
+    # RETRACEMENT/REVERSAL are momentary (see regime_feed's module docstring)
+    # -- build_regime_segments correctly drops their zero-width runs, so
+    # they get a point marker instead of a dropped band.
+    markers = build_regime_markers(states, sequence.bars)
 
     def epoch_of(instant: datetime) -> int:
         epoch = broker_epoch_by_utc.get(instant)
@@ -176,7 +185,7 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         return epoch
 
     return render_feed_lines(
-        segments, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
+        segments, markers, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
     )
 
 
@@ -204,8 +213,8 @@ def publish_once(config: EAConfig) -> int:
             if attempt == 9:
                 raise
             time.sleep(0.2)
-    band_count = max(len(lines) - 1, 0)  # minus the header
-    return band_count
+    event_count = max(len(lines) - 1, 0)  # minus the header; bands + markers
+    return event_count
 
 
 def main() -> None:
@@ -216,7 +225,7 @@ def main() -> None:
 
     if not watch:
         count = publish_once(config)
-        print(f"wrote {count} regime bands to {_feed_path(config)}")
+        print(f"wrote {count} regime events (bands + markers) to {_feed_path(config)}")
         return
 
     print(f"watching {config.bar_wire_path()} -- publishing regime feed (Ctrl+C to stop)")
@@ -224,7 +233,7 @@ def main() -> None:
         while True:
             try:
                 count = publish_once(config)
-                print(f"{datetime.now(UTC).isoformat()} wrote {count} regime bands")
+                print(f"{datetime.now(UTC).isoformat()} wrote {count} regime events")
             except PermissionError as exc:
                 # A stubborn file lock this cycle -- keep the watcher alive.
                 print(f"{datetime.now(UTC).isoformat()} feed busy, retrying next cycle: {exc}")

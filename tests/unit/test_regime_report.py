@@ -10,10 +10,12 @@ from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.observation.regime import (
     OBJECT_TYPE_REGIME_STATE,
+    OBJECT_TYPE_REGIME_TRANSITION,
     AnticipatedResolution,
     RegimeDirection,
     RegimeFeature,
     RegimeState,
+    RegimeTransition,
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
@@ -73,13 +75,30 @@ def _state(
     )
 
 
+def _transition(from_state: RegimeType, to_state: RegimeType, minute: int) -> RegimeTransition:
+    return RegimeTransition(
+        object_type=OBJECT_TYPE_REGIME_TRANSITION,
+        object_id=f"tr:{from_state.name}->{to_state.name}:{minute}",
+        observed_at=_at(minute),
+        recorded_at=_at(minute),
+        methodology_version=1,
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        from_state=from_state,
+        to_state=to_state,
+        evidence="test",
+    )
+
+
 def test_shares_and_durations_from_segments() -> None:
     segments = (
         _seg(RegimeType.CONSOLIDATION, 0, 10),   # 10 min
         _seg(RegimeType.EXPANSION, 10, 40),      # 30 min
         _seg(RegimeType.CONSOLIDATION, 40, None),  # closed by history_end at 60 -> 20 min
     )
-    report = build_regime_report(segments, (), history_end_utc=_at(60), bar_count=60)
+    report = build_regime_report(
+        segments, (), transitions_log=(), history_end_utc=_at(60), bar_count=60
+    )
 
     by_regime = {s.regime: s for s in report.per_regime}
     cons = by_regime[RegimeType.CONSOLIDATION]
@@ -92,19 +111,79 @@ def test_shares_and_durations_from_segments() -> None:
     assert abs(cons.share - 0.5) < 1e-9
     assert abs(exp.share - 0.5) < 1e-9
     assert exp.mean_minutes == 30.0
+    assert cons.is_momentary is False
+    assert exp.is_momentary is False
 
 
-def test_transitions_counted_between_consecutive_segments() -> None:
-    segments = (
-        _seg(RegimeType.CONSOLIDATION, 0, 10),
-        _seg(RegimeType.EXPANSION, 10, 20),
-        _seg(RegimeType.CONSOLIDATION, 20, 30),
-        _seg(RegimeType.EXPANSION, 30, None),
+def test_transitions_come_from_the_real_log_not_segments() -> None:
+    """The Transitions table is built from the engine's own
+    RegimeTransition log (transitions_log), not reconstructed from
+    consecutive segments -- see build_regime_report's own docstring for
+    why a segment reconstruction can be wrong."""
+    transitions_log = (
+        _transition(RegimeType.CONSOLIDATION, RegimeType.EXPANSION, 0),
+        _transition(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED, 10),
+        _transition(RegimeType.PULLBACK_UNRESOLVED, RegimeType.EXPANSION, 20),
+        _transition(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED, 30),
     )
-    report = build_regime_report(segments, (), history_end_utc=_at(40))
+    report = build_regime_report((), (), transitions_log=transitions_log, history_end_utc=None)
     counts = {(f.name, t.name): c for f, t, c in report.transitions}
-    assert counts[("CONSOLIDATION", "EXPANSION")] == 2
-    assert counts[("EXPANSION", "CONSOLIDATION")] == 1
+    assert counts[("CONSOLIDATION", "EXPANSION")] == 1
+    assert counts[("EXPANSION", "PULLBACK_UNRESOLVED")] == 2
+    assert counts[("PULLBACK_UNRESOLVED", "EXPANSION")] == 1
+
+
+def test_transitions_survive_a_dropped_zero_width_resolution() -> None:
+    """The exact bug this design fixes: PULLBACK_UNRESOLVED resolves to
+    RETRACEMENT and immediately re-enters EXPANSION in the same bar (a
+    zero-width run build_regime_segments drops), and the market pulls
+    back again right away. A segment-pairwise reconstruction would see
+    only [PULLBACK_UNRESOLVED, PULLBACK_UNRESOLVED] (RETRACEMENT and the
+    brief EXPANSION both dropped) and report a phantom self-transition
+    that never happened. The real log has no such gap."""
+    transitions_log = (
+        _transition(RegimeType.PULLBACK_UNRESOLVED, RegimeType.RETRACEMENT, 10),
+        _transition(RegimeType.RETRACEMENT, RegimeType.EXPANSION, 10),
+        _transition(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED, 10),
+    )
+    report = build_regime_report((), (), transitions_log=transitions_log, history_end_utc=None)
+    counts = {(f.name, t.name): c for f, t, c in report.transitions}
+    assert ("PULLBACK_UNRESOLVED", "PULLBACK_UNRESOLVED") not in counts
+    assert counts[("PULLBACK_UNRESOLVED", "RETRACEMENT")] == 1
+    assert counts[("RETRACEMENT", "EXPANSION")] == 1
+    assert counts[("EXPANSION", "PULLBACK_UNRESOLVED")] == 1
+
+
+def test_momentary_regimes_appear_with_occurrence_counts_not_durations() -> None:
+    """RETRACEMENT/REVERSAL have no segments (build_regime_segments drops
+    their zero-width runs) but they still happened -- the distribution
+    table must show them, flagged momentary, with a true occurrence
+    count, not silently vanish."""
+    segments = (_seg(RegimeType.EXPANSION, 0, None),)
+    states = (
+        _state(RegimeType.RETRACEMENT, 5),
+        _state(RegimeType.RETRACEMENT, 15, suffix="b"),
+        _state(RegimeType.REVERSAL, 25),
+    )
+    report = build_regime_report(
+        segments, states, transitions_log=(), history_end_utc=_at(30)
+    )
+    by_regime = {s.regime: s for s in report.per_regime}
+
+    retr = by_regime[RegimeType.RETRACEMENT]
+    rev = by_regime[RegimeType.REVERSAL]
+    assert retr.is_momentary is True
+    assert retr.segment_count == 2
+    assert retr.total_minutes == 0.0
+    assert retr.share == 0.0
+    assert rev.is_momentary is True
+    assert rev.segment_count == 1
+
+    # EXPANSION still carries the real duration; momentary rows never
+    # dilute another regime's share (durations only ever sum segments).
+    exp = by_regime[RegimeType.EXPANSION]
+    assert exp.is_momentary is False
+    assert exp.share == 1.0
 
 
 def test_er_and_hurst_means_per_regime() -> None:
@@ -119,7 +198,7 @@ def test_er_and_hurst_means_per_regime() -> None:
         _state(RegimeType.EXPANSION, 1, features=feat(0.6, 0.7)),
         _state(RegimeType.EXPANSION, 2, features=feat(0.8, 0.5), suffix="b"),
     )
-    report = build_regime_report(segments, states, history_end_utc=_at(3))
+    report = build_regime_report(segments, states, transitions_log=(), history_end_utc=_at(3))
     exp = next(s for s in report.per_regime if s.regime is RegimeType.EXPANSION)
     assert exp.mean_efficiency_ratio == 0.7  # (0.6 + 0.8) / 2
     assert exp.mean_hurst == 0.6  # (0.7 + 0.5) / 2
@@ -144,7 +223,7 @@ def test_anticipation_accuracy_matches_lean_against_outcome() -> None:
         ),
         _state(RegimeType.RETRACEMENT, 4, supersedes="st:PULLBACK_UNRESOLVED:3B", suffix="b"),
     )
-    report = build_regime_report((), states, history_end_utc=None)
+    report = build_regime_report((), states, transitions_log=(), history_end_utc=None)
     a = report.anticipation
     assert a.resolutions == 2
     assert a.to_retracement == 2

@@ -45,7 +45,11 @@ from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
-from vo.telemetry.regime_feed import build_regime_segments, render_feed_lines  # noqa: E402
+from vo.telemetry.regime_feed import (  # noqa: E402
+    build_regime_markers,
+    build_regime_segments,
+    render_feed_lines,
+)
 from vo.telemetry.regime_report import build_regime_report, render_report_markdown  # noqa: E402
 from vo.time.brokers import load_broker_profiles, resolve_broker_utc  # noqa: E402
 
@@ -152,20 +156,31 @@ def main() -> None:
     engine = build_regime_engine(regime_config, swing_config, tick_size=symbol.tick_size)
     ReplayHarness(sequence).run(engine)
     states = engine.states.all()
+    transitions_log = engine.transitions.all()
     segments = build_regime_segments(states, sequence.bars)
+    # RETRACEMENT/REVERSAL are momentary (see regime_feed's module docstring)
+    # -- build_regime_segments correctly drops their zero-width runs, so
+    # they get a point marker instead of a dropped band.
+    markers = build_regime_markers(states, sequence.bars)
 
     # 1. Full-history feed for VO_Regime.mq5.
     def epoch_of(instant: datetime) -> int:
         return broker_epoch_by_utc[instant]
 
-    feed_lines = render_feed_lines(segments, epoch_of=epoch_of, generated_utc=datetime.now(UTC))
+    feed_lines = render_feed_lines(
+        segments, markers, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
+    )
     feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
     _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
 
     # 2. Backtest report.
     history_end = sequence.bars[-1].open_time_utc
     report = build_regime_report(
-        segments, states, history_end_utc=history_end, bar_count=len(sequence)
+        segments,
+        states,
+        transitions_log=transitions_log,
+        history_end_utc=history_end,
+        bar_count=len(sequence),
     )
     markdown = render_report_markdown(report)
     report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
@@ -173,6 +188,7 @@ def main() -> None:
 
     print(f"bars used:        {len(sequence)} (of {len(rates)} pulled)")
     print(f"regime segments:  {len(segments)}")
+    print(f"regime markers:   {len(markers)} (RETRACEMENT/REVERSAL resolution points)")
     print(f"feed written:     {feed_path}")
     print(f"report written:   {report_path}")
     print()

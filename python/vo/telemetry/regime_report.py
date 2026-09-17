@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import statistics
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from itertools import pairwise
 
 from vo.observation.regime import (
     AnticipatedResolution,
     RegimeState,
+    RegimeTransition,
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
@@ -32,7 +33,17 @@ _HURST_FEATURE = "hurst_exponent"
 
 @dataclass(frozen=True)
 class RegimeStats:
-    """One regime's share of the backtest."""
+    """One regime's share of the backtest.
+
+    `is_momentary` is set for a regime that genuinely has zero measured
+    duration by the engine's own design (RETRACEMENT/REVERSAL: an
+    instantaneous resolution, immediately followed by re-entering
+    EXPANSION in the same bar -- never a period the market spends time
+    in) rather than one that simply never occurred. For those,
+    `segment_count` is the count of RegimeState occurrences (there is no
+    drawable "segment" to count instead); total/mean/median minutes are
+    0.0 and excluded from any other regime's `share` by construction
+    (duration accounting only ever sums non-momentary segments)."""
 
     regime: RegimeType
     segment_count: int
@@ -42,6 +53,7 @@ class RegimeStats:
     median_minutes: float
     mean_efficiency_ratio: float | None
     mean_hurst: float | None
+    is_momentary: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +100,7 @@ def build_regime_report(
     segments: tuple[RegimeSegment, ...],
     states: tuple[RegimeState, ...],
     *,
+    transitions_log: Sequence[RegimeTransition],
     history_end_utc: datetime | None,
     minutes_per_bar: float = 1.0,
     bar_count: int = 0,
@@ -95,10 +108,23 @@ def build_regime_report(
     """Summarize a regime backtest. `history_end_utc` closes the final,
     open-ended segment for duration accounting (its own end_utc is None);
     without it that segment is skipped from the time totals. `minutes_per_bar`
-    labels durations (1.0 for M1)."""
+    labels durations (1.0 for M1). `transitions_log` is the engine's own
+    RegimeTransition log (engine.transitions.all()) -- required, not
+    reconstructed from `segments`: a segment-pairwise reconstruction looks
+    plausible but is wrong whenever a resolution (RETRACEMENT/REVERSAL) sits
+    between two segments, because that resolution's own zero-width run was
+    already dropped by build_regime_segments. Two real transitions
+    (PULLBACK_UNRESOLVED -> RETRACEMENT, RETRACEMENT -> EXPANSION) would
+    then look like one phantom PULLBACK_UNRESOLVED -> EXPANSION, or -- if
+    the market re-entered a pullback immediately -- a PULLBACK_UNRESOLVED
+    -> PULLBACK_UNRESOLVED that never actually happened as a state
+    transition. The real log has no such gap."""
     del minutes_per_bar  # durations are wall-clock; kept for signature clarity
 
-    # Duration per segment, in minutes of wall-clock.
+    # Duration per segment, in minutes of wall-clock. RETRACEMENT/REVERSAL
+    # never appear here -- they have no segments (see build_regime_segments'
+    # own docstring on zero-width runs) -- which is exactly right, since
+    # they are momentary by the engine's own design, not a duration.
     durations: dict[RegimeType, list[float]] = {}
     for seg in segments:
         end = seg.end_utc if seg.end_utc is not None else history_end_utc
@@ -121,27 +147,36 @@ def build_regime_report(
             hurst_by_regime.setdefault(state.regime, []).append(hurst)
 
     seg_counts = Counter(seg.regime for seg in segments)
+    state_counts = Counter(state.regime for state in states)
+    # Every regime that ever appears as a drawable segment OR as a raw
+    # state record -- so a momentary regime (no segments at all, only
+    # states) still gets a row instead of silently disappearing.
+    all_regimes = {seg.regime for seg in segments} | set(state_counts)
+
     per_regime: list[RegimeStats] = []
-    for regime in sorted({seg.regime for seg in segments}, key=lambda r: r.name):
+    for regime in sorted(all_regimes, key=lambda r: r.name):
+        has_segments = regime in seg_counts
         mins = durations.get(regime, [])
         total = sum(mins)
         per_regime.append(
             RegimeStats(
                 regime=regime,
-                segment_count=seg_counts[regime],
+                segment_count=seg_counts[regime] if has_segments else state_counts[regime],
                 total_minutes=total,
                 share=total / grand_total,
                 mean_minutes=statistics.fmean(mins) if mins else 0.0,
                 median_minutes=statistics.median(mins) if mins else 0.0,
                 mean_efficiency_ratio=_mean_or_none(er_by_regime.get(regime, [])),
                 mean_hurst=_mean_or_none(hurst_by_regime.get(regime, [])),
+                is_momentary=not has_segments,
             )
         )
 
-    # Transitions: consecutive segments (already time-ordered).
-    trans_counter: Counter[tuple[RegimeType, RegimeType]] = Counter()
-    for prev, nxt in pairwise(segments):
-        trans_counter[(prev.regime, nxt.regime)] += 1
+    # Transitions: the engine's own log, not a segment reconstruction --
+    # see this function's own docstring for why the two can disagree.
+    trans_counter: Counter[tuple[RegimeType, RegimeType]] = Counter(
+        (t.from_state, t.to_state) for t in transitions_log
+    )
     transitions = tuple(
         (frm, to, count)
         for (frm, to), count in sorted(
@@ -224,15 +259,34 @@ def render_report_markdown(report: RegimeReport) -> str:
     lines.append("## Regime distribution")
     lines.append("")
     lines.append(
-        "| Regime | Segments | Share | Total min | Mean min | "
+        "| Regime | Count | Share | Total min | Mean min | "
         "Median min | Mean ER | Mean Hurst |"
     )
     lines.append("|---|--:|--:|--:|--:|--:|--:|--:|")
+    any_momentary = False
     for s in report.per_regime:
+        if s.is_momentary:
+            any_momentary = True
+            name = f"{s.regime.name} *"
+            share_str = total_str = mean_str = median_str = "—"
+        else:
+            name = s.regime.name
+            share_str = f"{s.share * 100:.1f}%"
+            total_str = f"{s.total_minutes:.0f}"
+            mean_str = f"{s.mean_minutes:.1f}"
+            median_str = f"{s.median_minutes:.1f}"
         lines.append(
-            f"| {s.regime.name} | {s.segment_count} | {s.share * 100:.1f}% | "
-            f"{s.total_minutes:.0f} | {s.mean_minutes:.1f} | {s.median_minutes:.1f} | "
+            f"| {name} | {s.segment_count} | {share_str} | "
+            f"{total_str} | {mean_str} | {median_str} | "
             f"{_fmt(s.mean_efficiency_ratio)} | {_fmt(s.mean_hurst)} |"
+        )
+    if any_momentary:
+        lines.append("")
+        lines.append(
+            "\\* momentary: an instantaneous resolution (RETRACEMENT/REVERSAL) -- "
+            "the engine confirms it and re-enters EXPANSION in the same bar, so "
+            "there is no duration to measure. Count is how many times it happened, "
+            "not a band count."
         )
     lines.append("")
 
