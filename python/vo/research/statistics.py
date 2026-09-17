@@ -31,6 +31,17 @@ binomial test and the Wilson interval have simple, well-known closed-form
 or normal-approximation formulas that do not need numpy's help; every one
 of them below is independently verified against hand-computed exact
 values in tests/unit/test_research_statistics.py.
+
+WindowStats/build_window_distributions and OutOfSampleRow/build_out_of_
+sample_report (added alongside Phase 15b) generalize a second pattern
+that showed up identically in Phase 15a's Hurst report and would have
+been copy-pasted a second time for Efficiency Ratio: "describe this
+window length's rolling samples, plus their own lag-1 stability" and "a
+single fixed chronological train/test split per window length." Both are
+generic over any dict[int, list[tuple[datetime, float]]] rolling-sample
+series -- nothing Hurst- or ER-specific about the shape -- so they moved
+here rather than being defined a second time in
+vo.research.efficiency_ratio_report.
 """
 
 from __future__ import annotations
@@ -210,3 +221,89 @@ def lag1_autocorrelation(values: Sequence[float]) -> float | None:
         return statistics.correlation(values[:-1], values[1:])
     except statistics.StatisticsError:
         return None
+
+
+@dataclass(frozen=True)
+class WindowStats:
+    """One window length's overall distribution, plus a lag-1
+    autocorrelation of its own consecutive rolling estimates as a simple
+    "how noisy is this window length's read" stability signal -- higher
+    means consecutive samples agree more, lower/near-zero means the
+    estimate is jumpier at that window length. Generic over any bounded
+    or continuous per-bar measurement sampled across window lengths --
+    introduced for Phase 15a's Hurst report, reused as-is by Phase 15b's
+    Efficiency Ratio report rather than redefined a second time."""
+
+    window: int
+    stats: GroupStats
+    stability_lag1_autocorrelation: float | None
+
+
+def build_window_distributions(
+    rolling: dict[int, list[tuple[object, float]]], *, window_lengths: Sequence[int]
+) -> tuple[WindowStats, ...]:
+    """Describe each window length's rolling sample series in `rolling`
+    (period -> chronological (timestamp, value) pairs, e.g. the output of
+    a module's own build_rolling_<metric> function). Window lengths with
+    no samples are skipped, never coerced into an empty/fake row."""
+    out: list[WindowStats] = []
+    for period in window_lengths:
+        samples = rolling.get(period, [])
+        if not samples:
+            continue
+        values = [v for _t, v in samples]
+        out.append(
+            WindowStats(
+                window=period,
+                stats=describe(values, f"window={period}"),
+                stability_lag1_autocorrelation=lag1_autocorrelation(values),
+            )
+        )
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class OutOfSampleRow:
+    """One window length's fixed chronological train/test split -- see
+    each report module's own OUT-OF-SAMPLE CAVEAT for why this is a
+    first honest check, not a real walk-forward protocol. Generic over
+    any windowed rolling series, same reuse rationale as WindowStats
+    above."""
+
+    window: int
+    train: GroupStats
+    test: GroupStats
+    median_delta: float  # test.median - train.median, signed
+
+
+def build_out_of_sample_report(
+    rolling: dict[int, list[tuple[object, float]]],
+    *,
+    window_lengths: Sequence[int],
+    split_fraction: float = 0.7,
+) -> tuple[OutOfSampleRow, ...]:
+    """A single fixed chronological split per window length. Samples are
+    assumed already chronological (the caller's own rolling-sample
+    builder walks bars in order); the split point is by SAMPLE COUNT,
+    not calendar time, so both halves have comparable statistical power
+    even if trading activity is uneven."""
+    if not 0.0 < split_fraction < 1.0:
+        raise ValueError(f"split_fraction must be in (0, 1), got {split_fraction}")
+
+    out: list[OutOfSampleRow] = []
+    for period in window_lengths:
+        samples = rolling.get(period, [])
+        if len(samples) < 4:  # need at least 2 points per half to describe() meaningfully
+            continue
+        cut = int(len(samples) * split_fraction)
+        cut = max(1, min(len(samples) - 1, cut))
+        train_values = [v for _t, v in samples[:cut]]
+        test_values = [v for _t, v in samples[cut:]]
+        train = describe(train_values, f"window={period} train")
+        test = describe(test_values, f"window={period} test")
+        out.append(
+            OutOfSampleRow(
+                window=period, train=train, test=test, median_delta=test.median - train.median
+            )
+        )
+    return tuple(out)

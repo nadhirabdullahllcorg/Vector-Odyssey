@@ -18,17 +18,16 @@ from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.observation.regime import OBJECT_TYPE_REGIME_TRANSITION, RegimeTransition, RegimeType
 from vo.research.hurst_report import (
-    RegimeInterval,
     build_hurst_by_regime,
     build_hurst_by_regime_report,
     build_hurst_by_session,
     build_hurst_preceding_transitions,
-    build_out_of_sample_report,
     build_rolling_hurst,
     build_transition_hurst_report,
-    build_window_distributions,
     render_hurst_report_markdown,
 )
+from vo.research.regime_windows import RegimeInterval
+from vo.research.statistics import build_out_of_sample_report, build_window_distributions
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, SessionWindow
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="Test", broker_symbol="US100")

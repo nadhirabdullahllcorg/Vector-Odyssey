@@ -3,7 +3,7 @@
 Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
     python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] \
-        [--validate] [--hurst-report]
+        [--validate] [--hurst-report] [--er-report]
 
 --validate additionally builds a Regime Engine Validation Report v1
 (vo.telemetry.regime_validation) from the SAME in-memory replay -- no
@@ -18,6 +18,13 @@ writes hurst_report_<symbol>.md. Independent of --validate; either or
 both may be passed. Samples on a stride (not every bar) since
 hurst_exponent's cost grows with the window length -- see the module's
 own docstring for why.
+
+--er-report additionally builds Phase 15b's standalone Efficiency Ratio
+characterization report (vo.research.efficiency_ratio_report) from the
+SAME in-memory replay, same sections and sampling discipline as
+--hurst-report -- and writes efficiency_ratio_report_<symbol>.md.
+Independent of --validate and --hurst-report; any combination may be
+passed.
 
 The live publisher (scripts/publish_regime.py) only ever sees the ~500
 bars VO_Bridge backfills -- a short runway. This pulls a MUCH longer M1
@@ -60,17 +67,32 @@ from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
+from vo.research.efficiency_ratio_report import (  # noqa: E402
+    DEFAULT_STRIDE as ER_DEFAULT_STRIDE,
+)
+from vo.research.efficiency_ratio_report import (  # noqa: E402
+    DEFAULT_WINDOW_LENGTHS as ER_DEFAULT_WINDOW_LENGTHS,
+)
+from vo.research.efficiency_ratio_report import (  # noqa: E402
+    build_er_by_regime_report,
+    build_er_by_session,
+    build_rolling_er,
+    build_transition_er_report,
+    render_er_report_markdown,
+)
 from vo.research.hurst_report import (  # noqa: E402
     DEFAULT_STRIDE,
     DEFAULT_WINDOW_LENGTHS,
-    RegimeInterval,
     build_hurst_by_regime_report,
     build_hurst_by_session,
-    build_out_of_sample_report,
     build_rolling_hurst,
     build_transition_hurst_report,
-    build_window_distributions,
     render_hurst_report_markdown,
+)
+from vo.research.regime_windows import RegimeInterval  # noqa: E402
+from vo.research.statistics import (  # noqa: E402
+    build_out_of_sample_report,
+    build_window_distributions,
 )
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
@@ -106,11 +128,12 @@ REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool]:
+def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
     validate = False
     hurst_report = False
+    er_report = False
     rest = []
     i = 0
     while i < len(argv):
@@ -123,12 +146,15 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool]:
         elif argv[i] == "--hurst-report":
             hurst_report = True
             i += 1
+        elif argv[i] == "--er-report":
+            er_report = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
     if rest:
         config_path = rest[0]
-    return config_path, bars, validate, hurst_report
+    return config_path, bars, validate, hurst_report, er_report
 
 
 def _write_feed_atomic(out_path: Path, text: str) -> None:
@@ -146,7 +172,7 @@ def _write_feed_atomic(out_path: Path, text: str) -> None:
 
 
 def main() -> None:
-    config_path, bar_cap, validate, hurst_report = _parse_args(sys.argv[1:])
+    config_path, bar_cap, validate, hurst_report, er_report = _parse_args(sys.argv[1:])
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
@@ -370,6 +396,57 @@ def main() -> None:
         hurst_report_path.write_text(hurst_markdown, encoding="utf-8")
         print(f"  -> Hurst report built in {time.monotonic() - _t_hurst:.1f}s", flush=True)
 
+    er_report_path: Path | None = None
+    if er_report:
+        print("building Efficiency Ratio research report (Phase 15b)...", flush=True)
+        _t_er = time.monotonic()
+        # always sample the configured efficiency_ratio_period too, even if it
+        # isn't one of the default sweep values, so the "primary window"
+        # tables are never silently empty -- same pattern as --hurst-report.
+        er_window_lengths = tuple(
+            sorted({*ER_DEFAULT_WINDOW_LENGTHS, regime_config.efficiency_ratio_period})
+        )
+        er_rolling = build_rolling_er(sequence.bars, window_lengths=er_window_lengths)
+        er_window_dists = build_window_distributions(er_rolling, window_lengths=er_window_lengths)
+        er_intervals = tuple(
+            RegimeInterval(regime=seg.regime, start_utc=seg.start_utc, end_utc=seg.end_utc)
+            for seg in segments
+        )
+        er_by_regime = build_er_by_regime_report(
+            er_rolling,
+            er_intervals,
+            window_lengths=er_window_lengths,
+            primary_window=regime_config.efficiency_ratio_period,
+        )
+        er_transitions = build_transition_er_report(
+            er_rolling.get(regime_config.efficiency_ratio_period, []),
+            transitions_log,
+            max_gap_minutes=90.0,
+        )
+        er_by_session = (
+            build_er_by_session(
+                er_rolling.get(regime_config.efficiency_ratio_period, []), session_config
+            )
+            if session_config is not None
+            else ()
+        )
+        er_out_of_sample = build_out_of_sample_report(er_rolling, window_lengths=er_window_lengths)
+        er_markdown = render_er_report_markdown(
+            instrument_key=config.broker_symbol,
+            timeframe_canonical="M1",
+            generated_utc=datetime.now(UTC),
+            primary_window=regime_config.efficiency_ratio_period,
+            stride=ER_DEFAULT_STRIDE,
+            window_distributions=er_window_dists,
+            by_regime=er_by_regime,
+            transitions=er_transitions,
+            by_session=er_by_session,
+            out_of_sample=er_out_of_sample,
+        )
+        er_report_path = REPO_ROOT / f"efficiency_ratio_report_{config.broker_symbol}.md"
+        er_report_path.write_text(er_markdown, encoding="utf-8")
+        print(f"  -> ER report built in {time.monotonic() - _t_er:.1f}s", flush=True)
+
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
     coverage_pct = (trading_days / calendar_days * 100.0) if calendar_days > 0 else 100.0
@@ -395,6 +472,8 @@ def main() -> None:
         print(f"validation report written: {validation_report_path}")
     if hurst_report_path is not None:
         print(f"Hurst report written: {hurst_report_path}")
+    if er_report_path is not None:
+        print(f"ER report written: {er_report_path}")
     print()
     print(markdown)
 

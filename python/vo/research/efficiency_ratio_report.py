@@ -1,88 +1,93 @@
 """
-Standalone Hurst characterization report -- Phase 15a (vo.research, layer 5).
+Standalone Efficiency Ratio characterization report -- Phase 15b
+(vo.research, layer 5).
 
-WHY THIS EXISTS, AND WHY IT IS SEPARATE FROM regime_validation.py. The
-user's own architecture for this next round of work (recorded in
-architecture/vo-phase-plan.md's v33 and its new S15-notes section) is
-explicit: Hurst, Efficiency Ratio, Markov, and HMM must each be
-characterized INDEPENDENTLY against the frozen 1,000,000-bar baseline --
-rolling distributions, window-length sensitivity, regime/session/
-transition conditioning, out-of-sample stability -- before any
-comparative/ensemble step. regime_validation.py's build_evidence_
-comparison already looked at ER/Hurst, but only at the ONE window length
-baked into config/settings/regime.yaml (hurst_period), and only as a
-RETRACEMENT-vs-REVERSAL mean/Mann-Whitney snapshot -- that is the FINAL
-"comparative study" stage of the user's own diagram, not the standalone
-characterization stage this module performs first. This module answers a
-different, prior question: does Hurst itself behave like a stable,
-meaningful measurement across window lengths, regimes, sessions, and
-time, before any comparison to ER or to the regime label is trusted.
+WHY THIS EXISTS, AND HOW IT RELATES TO HURST_REPORT.PY. Same rationale,
+same user-set order (architecture/vo-phase-plan.md's S15-notes): Hurst,
+Efficiency Ratio (ER), Markov, and HMM must each be characterized
+INDEPENDENTLY against the frozen 1,000,000-bar baseline before any
+comparative/ensemble step. hurst_report.py (Phase 15a) did this for
+Hurst first ("cheapest and most useful first" -- the user's own framing,
+since hurst_exponent already took arbitrary window lengths). This module
+is the very next step in that same order, for
+vo.observation.efficiency_ratio.efficiency_ratio -- same six sections,
+same reuse-not-reimplementation posture, same refusal to propose a
+threshold. Where the two reports differ is only in what is worth saying
+about ER specifically (see WHAT ER MEANS HERE below); the mechanics
+(rolling sampling, regime/session/transition conditioning, out-of-sample
+split) are shared code, not shared prose -- see REUSE, NOT
+REIMPLEMENTATION.
 
-DOES NOT decide, classify, or vote. This module never writes a
-RegimeState and is never imported by vo.observation (a downward-only
-import would be needed for that anyway -- see the layering note below).
-It is read-only research over an already-completed backtest run,
-several layers removed from any decision path -- the same G2 posture
-regime_validation.py already established. Per the user's own explicit
-rule for this round: "Don't let the quantitative models vote on the
-regime. At least initially." Nothing here proposes "IF HURST > X THEN
-Y" -- see the CONCLUSIONS note at the end of the rendered report.
+DOES NOT decide, classify, or vote. Same G2 posture as hurst_report.py:
+read-only research over an already-completed backtest run, several
+layers removed from any decision path. Per the user's own explicit rule
+for this round: "Don't let the quantitative models vote on the regime.
+At least initially."
 
-LAYERING. vo.research is layer 5; vo.telemetry (regime_feed, regime_
-report, regime_validation) is layer 7 -- a HIGHER layer, so this module
-may not import it (upward imports are structurally forbidden, see
-tests/unit/test_architecture.py). That means this module cannot take a
-vo.telemetry.regime_feed.RegimeSegment directly. RegimeInterval (regime +
-start_utc + end_utc only) and its membership lookup live in
-vo.research.regime_windows -- shared with efficiency_ratio_report.py,
-which needs the identical lookup -- and the CALLER (scripts/
-backtest_regime.py, or any other layer-7+ orchestrator) maps its
-already-built RegimeSegments into these before calling in. This is a
-thin, one-line adapter at the call site, not a duplicated computation:
-no segment-building/merging logic is reimplemented here.
+WHAT ER MEANS HERE, AND WHY THE EXISTING CLASSIFIER THRESHOLDS ARE NOT
+THIS REPORT'S BUSINESS. efficiency_ratio.py already documents the
+formula: net distance travelled / total path length, bounded to [0, 1]
+by construction (0 = pure chop, 1 = a perfectly straight run).
+config/settings/regime.yaml ALREADY uses two ER thresholds
+(anticipation.er_trend_threshold=0.5, anticipation.er_chop_threshold=0.3)
+to set the [VO-H] anticipation LEAN on an unresolved pullback -- but
+that is production classifier code, already shipped, already gated
+(G6), and explicitly NOT what this report is characterizing or
+validating. This report describes ER's own distribution -- where it
+actually falls, by window length, by regime, by session, before/after a
+transition -- as independent evidence for the user's own later
+comparative study; it does not check whether 0.5/0.3 are good cutoffs,
+and finding that ER commonly sits above or below those two numbers in
+some bucket is not, by itself, a reason to change them.
 
-REUSE, NOT REIMPLEMENTATION. vo.observation.hurst.hurst_exponent(bars,
-index, *, period) already computes a single Hurst estimate at an
-arbitrary (index, period) pair, with no lookahead (bars[<= index] only).
-Everything below is orchestration over that one already-verified
-function -- calling it repeatedly across a stride of bar indices and
-several period values -- never a second estimator. vo.research.
-statistics supplies every distributional primitive (percentile,
-describe/GroupStats, mann_whitney_u, lag1_autocorrelation); nothing here
-hand-rolls a formula regime_validation.py or vo.research.statistics
-would also need.
+LAYERING. vo.research is layer 5; vo.telemetry is layer 7 -- see
+hurst_report.py's own LAYERING note for the full explanation, which
+applies identically here. RegimeInterval and its membership lookup live
+in vo.research.regime_windows, shared with hurst_report.py rather than
+defined a second time.
 
-WHY A STRIDE, NOT EVERY BAR. hurst_exponent's cost is roughly
-O(period^2) (it fits a line across O(period) lags, each an O(period)
-pass over the window). At the frozen baseline's 1,000,000 bars, computing
-it at every single bar for several window lengths would be needlessly
-slow for a distributional read that does not need every bar -- a
-periodic sample (`stride` bars apart) gives a large, representative
-sample (tens of thousands of points) at a small fraction of the cost.
-This is a deliberate, named sampling choice, not a silent shortcut.
+REUSE, NOT REIMPLEMENTATION. vo.observation.efficiency_ratio.
+efficiency_ratio(bars, index, *, period) already computes a single ER
+estimate at an arbitrary (index, period) pair, with no lookahead
+(bars[<= index] only) -- everything below is orchestration over that one
+already-verified function, exactly mirroring build_rolling_hurst's own
+structure. The window-distribution/stability read (WindowStats/
+build_window_distributions) and the out-of-sample split (OutOfSampleRow/
+build_out_of_sample_report) are fully generic over any windowed rolling
+series and live in vo.research.statistics -- introduced there precisely
+so this module would not need to redefine them (see that module's own
+docstring). Only the regime/session/transition orchestration below is
+new, ER-specific code, and even that mirrors hurst_report.py's shape
+closely enough that a future reader should read the two side by side.
 
-SECTIONS, MATCHING THE USER'S OWN LIST.
-  1. Rolling Hurst distribution + window-length sensitivity/stability.
-  2. Hurst by regime, at every tested window length (median-only
+WHY A STRIDE, NOT EVERY BAR. Same reasoning as hurst_report.py: a
+periodic sample gives a large, representative distributional read at a
+small fraction of the cost of computing at every bar. efficiency_ratio's
+own cost is O(period) per call (one pass summing path length), cheaper
+than hurst_exponent's O(period^2) -- but the same stride is used anyway,
+for a like-for-like comparison against the Hurst report's own sampling
+and because 1,000,000 bars at even O(period) per sample across several
+window lengths is still worth not doing at every bar for a distributional
+read that does not need every bar.
+
+SECTIONS, MATCHING HURST_REPORT.PY'S OWN LIST (AND THE USER'S ORIGINAL
+ONE).
+  1. Rolling ER distribution + window-length sensitivity/stability.
+  2. ER by regime, at every tested window length (median-only
      sensitivity table) plus full distributions + pairwise Mann-Whitney
      tests at the ONE configured/"primary" window length.
-  3. Hurst preceding regime transitions, grouped by the transition's
+  3. ER preceding regime transitions, grouped by the transition's
      to_state, at the primary window length.
-  4. Hurst by session, at the primary window length.
+  4. ER by session, at the primary window length.
   5. Out-of-sample stability: an independent Section-1-style read on the
      chronological first `split_fraction` of samples vs. the rest, per
      window length.
-  6. Hurst by timeframe: explicitly NOT built -- this pipeline has no
-     multi-timeframe bar-aggregation utility yet (everything here runs
-     on the native M1 stream). Flagged, not silently skipped.
+  6. ER by timeframe: explicitly NOT built -- same reason as
+     hurst_report.py (no multi-timeframe bar-aggregation utility yet).
 
-OUT-OF-SAMPLE CAVEAT. The split in section 5 is a single fixed
-chronological cut, not a proper walk-forward validation -- it answers
-"does the read from the first period look like the read from the rest,"
-which is a reasonable first check and NOT a substitute for a real
-out-of-sample protocol once any threshold is ever proposed. Named here,
-not hidden, matching regime_validation.py's own convention for its
-period-breakdown approximations.
+OUT-OF-SAMPLE CAVEAT. Same caveat as hurst_report.py: the split in
+section 5 is a single fixed chronological cut, not a proper walk-forward
+validation.
 """
 
 from __future__ import annotations
@@ -93,7 +98,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from vo.market.bar import Bar
-from vo.observation.hurst import hurst_exponent
+from vo.observation.efficiency_ratio import efficiency_ratio
 from vo.observation.regime import RegimeTransition, RegimeType
 from vo.research.regime_windows import RegimeInterval
 from vo.research.regime_windows import interval_at as _interval_at
@@ -107,53 +112,51 @@ from vo.research.statistics import (
 )
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
 
-DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (10, 20, 40, 80)
-DEFAULT_PRIMARY_WINDOW = 20  # matches config/settings/regime.yaml's hurst_period default
+DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (5, 10, 20, 40)
+DEFAULT_PRIMARY_WINDOW = 10  # matches config/settings/regime.yaml's efficiency_ratio_period default
 DEFAULT_STRIDE = 30
 
 _ALL_REGIMES: tuple[RegimeType, ...] = tuple(RegimeType)
 
 
-# ── 1. rolling Hurst distribution + window-length sensitivity ───────────
+# ── 1. rolling ER distribution + window-length sensitivity ──────────────
 
 
-def build_rolling_hurst(
+def build_rolling_er(
     bars: Sequence[Bar],
     *,
     window_lengths: Sequence[int] = DEFAULT_WINDOW_LENGTHS,
     stride: int = DEFAULT_STRIDE,
 ) -> dict[int, list[tuple[datetime, float]]]:
-    """Sample hurst_exponent at every `stride`-th bar index, for each
+    """Sample efficiency_ratio at every `stride`-th bar index, for each
     period in `window_lengths`. Returns, per period, a chronological list
-    of (bar open_time_utc, hurst value) -- None estimates (warmup window,
-    degenerate/flat window) are dropped, never coerced to a fake number."""
+    of (bar open_time_utc, ER value) -- None estimates (warmup window)
+    are dropped, never coerced to a fake number. Unlike Hurst, ER never
+    returns None for a flat window (it is 0.0 there by definition, per
+    efficiency_ratio's own docstring), so the only samples dropped here
+    are true insufficient-history warmup."""
     if stride < 1:
         raise ValueError(f"stride must be >= 1, got {stride}")
 
     out: dict[int, list[tuple[datetime, float]]] = {period: [] for period in window_lengths}
     for index in range(0, len(bars), stride):
         for period in window_lengths:
-            value = hurst_exponent(bars, index, period=period)
+            value = efficiency_ratio(bars, index, period=period)
             if value is not None:
                 out[period].append((bars[index].open_time_utc, value))
     return out
 
 
-# regime-interval membership lookup (build_hurst_by_regime, section 2) is
-# vo.research.regime_windows.interval_at, imported above as _interval_at --
-# shared with efficiency_ratio_report.py rather than defined twice.
+# ── 2. ER by regime, across window lengths + full detail at the primary ──
 
 
-# ── 2. Hurst by regime, across window lengths + full detail at the primary ──
-
-
-def build_hurst_by_regime(
+def build_er_by_regime(
     samples: Sequence[tuple[datetime, float]], intervals: Sequence[RegimeInterval]
 ) -> dict[RegimeType, list[float]]:
     """Groups one window length's rolling samples by whichever regime
-    interval covered each sample's time. Samples falling outside every
-    interval (before the first, or in a gap -- should not happen given
-    the contiguous-segments contract, but not assumed) are dropped."""
+    interval covered each sample's time -- identical grouping logic to
+    hurst_report.build_hurst_by_regime, via the shared
+    vo.research.regime_windows.interval_at lookup."""
     starts = [interval.start_utc for interval in intervals]
     out: dict[RegimeType, list[float]] = {}
     for when, value in samples:
@@ -165,8 +168,8 @@ def build_hurst_by_regime(
 
 
 @dataclass(frozen=True)
-class RegimeSensitivityRow:
-    """One window length's median Hurst per regime -- the compact,
+class ERSensitivityRow:
+    """One window length's median ER per regime -- the compact,
     median-only cross-window view (full distributions would be too much
     to render for every window length; see `by_regime_detail` for the
     one primary window length's full picture)."""
@@ -176,31 +179,31 @@ class RegimeSensitivityRow:
 
 
 @dataclass(frozen=True)
-class HurstByRegime:
-    sensitivity: tuple[RegimeSensitivityRow, ...]
+class ERByRegime:
+    sensitivity: tuple[ERSensitivityRow, ...]
     by_regime_detail: tuple[GroupStats, ...]  # primary window only, one per regime with data
     pairwise: tuple[MannWhitneyResult, ...]  # primary window only, all regime pairs with data
 
 
-def build_hurst_by_regime_report(
+def build_er_by_regime_report(
     rolling: dict[int, list[tuple[datetime, float]]],
     intervals: Sequence[RegimeInterval],
     *,
     window_lengths: Sequence[int] = DEFAULT_WINDOW_LENGTHS,
     primary_window: int = DEFAULT_PRIMARY_WINDOW,
-) -> HurstByRegime:
-    sensitivity: list[RegimeSensitivityRow] = []
+) -> ERByRegime:
+    sensitivity: list[ERSensitivityRow] = []
     for period in window_lengths:
-        grouped = build_hurst_by_regime(rolling.get(period, []), intervals)
+        grouped = build_er_by_regime(rolling.get(period, []), intervals)
         medians = {
             regime: describe(values, regime.name).median
             for regime, values in grouped.items()
             if values
         }
         if medians:
-            sensitivity.append(RegimeSensitivityRow(window=period, median_by_regime=medians))
+            sensitivity.append(ERSensitivityRow(window=period, median_by_regime=medians))
 
-    primary_grouped = build_hurst_by_regime(rolling.get(primary_window, []), intervals)
+    primary_grouped = build_er_by_regime(rolling.get(primary_window, []), intervals)
     detail = tuple(
         describe(primary_grouped[regime], regime.name)
         for regime in _ALL_REGIMES
@@ -215,30 +218,32 @@ def build_hurst_by_regime_report(
                 mann_whitney_u(
                     primary_grouped[regime_a],
                     primary_grouped[regime_b],
-                    label=f"hurst: {regime_a.name} vs {regime_b.name} (window={primary_window})",
+                    label=f"efficiency_ratio: {regime_a.name} vs {regime_b.name} "
+                    f"(window={primary_window})",
                 )
             )
 
-    return HurstByRegime(
+    return ERByRegime(
         sensitivity=tuple(sensitivity), by_regime_detail=detail, pairwise=tuple(pairwise)
     )
 
 
-# ── 3. Hurst preceding regime transitions ────────────────────────────────
+# ── 3. ER preceding regime transitions ───────────────────────────────────
 
 
-def build_hurst_preceding_transitions(
+def build_er_preceding_transitions(
     samples: Sequence[tuple[datetime, float]],
     transitions_log: Sequence[RegimeTransition],
     *,
     max_gap_minutes: float,
 ) -> dict[RegimeType, list[float]]:
-    """For each transition, the nearest Hurst sample AT OR BEFORE its
+    """For each transition, the nearest ER sample AT OR BEFORE its
     observed_at (no lookahead across the transition itself), grouped by
-    the transition's to_state -- "what did Hurst look like right before
-    the market resolved into this regime." Skips a transition when its
+    the transition's to_state -- "what did ER look like right before the
+    market resolved into this regime." Skips a transition when its
     nearest earlier sample is more than `max_gap_minutes` away (a real
-    data gap, e.g. a weekend, rather than a stale match)."""
+    data gap, e.g. a weekend, rather than a stale match). Identical
+    matching logic to hurst_report.build_hurst_preceding_transitions."""
     sample_times = [t for t, _v in samples]
     out: dict[RegimeType, list[float]] = {}
     for transition in transitions_log:
@@ -254,18 +259,18 @@ def build_hurst_preceding_transitions(
 
 
 @dataclass(frozen=True)
-class TransitionHurstReport:
+class TransitionERReport:
     by_to_state: tuple[GroupStats, ...]
     pairwise: tuple[MannWhitneyResult, ...]
 
 
-def build_transition_hurst_report(
+def build_transition_er_report(
     samples: Sequence[tuple[datetime, float]],
     transitions_log: Sequence[RegimeTransition],
     *,
     max_gap_minutes: float,
-) -> TransitionHurstReport:
-    grouped = build_hurst_preceding_transitions(
+) -> TransitionERReport:
+    grouped = build_er_preceding_transitions(
         samples, transitions_log, max_gap_minutes=max_gap_minutes
     )
     by_to_state = tuple(
@@ -279,16 +284,17 @@ def build_transition_hurst_report(
                 mann_whitney_u(
                     grouped[regime_a],
                     grouped[regime_b],
-                    label=f"hurst preceding transition to: {regime_a.name} vs {regime_b.name}",
+                    label=f"efficiency_ratio preceding transition to: "
+                    f"{regime_a.name} vs {regime_b.name}",
                 )
             )
-    return TransitionHurstReport(by_to_state=by_to_state, pairwise=tuple(pairwise))
+    return TransitionERReport(by_to_state=by_to_state, pairwise=tuple(pairwise))
 
 
-# ── 4. Hurst by session ──────────────────────────────────────────────────
+# ── 4. ER by session ──────────────────────────────────────────────────────
 
 
-def build_hurst_by_session(
+def build_er_by_session(
     samples: Sequence[tuple[datetime, float]], session_config: SessionConfig
 ) -> tuple[GroupStats, ...]:
     grouped: dict[str, list[float]] = {}
@@ -299,7 +305,9 @@ def build_hurst_by_session(
     return tuple(describe(values, label) for label, values in grouped.items() if values)
 
 
-# ── 5. out-of-sample stability ───────────────────────────────────────────
+# ── 5. out-of-sample stability is vo.research.statistics.build_out_of_
+# sample_report -- fully generic, reused as-is (see this module's own
+# REUSE, NOT REIMPLEMENTATION note). No local wrapper here.
 
 
 # ── rendering ─────────────────────────────────────────────────────────
@@ -315,7 +323,7 @@ def _fmt_p(p_value: float | None) -> str:
     return "<0.0001" if p_value < 0.0001 else f"{p_value:.4f}"
 
 
-def render_hurst_report_markdown(
+def render_er_report_markdown(
     *,
     instrument_key: str,
     timeframe_canonical: str,
@@ -323,39 +331,41 @@ def render_hurst_report_markdown(
     primary_window: int,
     stride: int,
     window_distributions: Sequence[WindowStats],
-    by_regime: HurstByRegime,
-    transitions: TransitionHurstReport,
+    by_regime: ERByRegime,
+    transitions: TransitionERReport,
     by_session: Sequence[GroupStats],
     out_of_sample: Sequence[OutOfSampleRow],
 ) -> str:
     lines: list[str] = []
     lines.append(
-        f"# Hurst Exponent Research Report v1 (Phase 15a) — "
+        f"# Efficiency Ratio Research Report v1 (Phase 15b) — "
         f"{instrument_key} {timeframe_canonical}"
     )
     lines.append("")
     lines.append(f"Generated: {generated_utc.isoformat()} (UTC)")
     lines.append("")
     lines.append(
-        "Standalone characterization of vo.observation.hurst.hurst_exponent against "
-        "the frozen 1,000,000-bar regime baseline -- read alone, before any "
-        "comparison to Efficiency Ratio, Markov, or the VO regime classifier itself. "
-        "Nothing here decides or classifies anything; this is research analysis of "
-        "an already-completed backtest run (see this module's own docstring for the "
-        "full rationale). Read every comparison below as hypothesis-generating, "
-        "never as a threshold rule -- 'IF HURST > X THEN Y' is exactly what this "
-        "report deliberately does not propose."
+        "Standalone characterization of vo.observation.efficiency_ratio.efficiency_ratio "
+        "against the frozen 1,000,000-bar regime baseline -- read alone, before any "
+        "comparison to Hurst, Markov, or the VO regime classifier itself. ER is bounded "
+        "to [0, 1] by construction: 0 is pure chop (a long path that ends where it "
+        "started), 1 is a perfectly straight run. Nothing here decides or classifies "
+        "anything, and nothing here checks or proposes the anticipation-lean thresholds "
+        "already in config/settings/regime.yaml (er_trend_threshold=0.5, "
+        "er_chop_threshold=0.3) -- see this module's own docstring for why. Read every "
+        "comparison below as hypothesis-generating, never as a threshold rule -- "
+        "'IF ER > X THEN Y' is exactly what this report deliberately does not propose."
     )
     lines.append("")
     lines.append(
         f"Sampling: every {stride}-th bar; primary/configured window length "
         f"**{primary_window}** bars (matches config/settings/regime.yaml's "
-        f"hurst_period)."
+        f"efficiency_ratio_period)."
     )
     lines.append("")
 
     # 1. window-length sensitivity
-    lines.append("## 1. Rolling Hurst distribution & window-length sensitivity")
+    lines.append("## 1. Rolling Efficiency Ratio distribution & window-length sensitivity")
     lines.append("")
     lines.append("| Window | n | Mean | Median | Stdev | P25 | P75 | Lag-1 autocorr. |")
     lines.append("|---|--:|--:|--:|--:|--:|--:|--:|")
@@ -376,9 +386,9 @@ def render_hurst_report_markdown(
     lines.append("")
 
     # 2. by regime
-    lines.append("## 2. Hurst by regime")
+    lines.append("## 2. Efficiency Ratio by regime")
     lines.append("")
-    lines.append("### Sensitivity: median Hurst per regime, across window lengths")
+    lines.append("### Sensitivity: median ER per regime, across window lengths")
     lines.append("")
     header = ["Window", *[r.name for r in _ALL_REGIMES]]
     lines.append("| " + " | ".join(header) + " |")
@@ -410,12 +420,12 @@ def render_hurst_report_markdown(
     lines.append("")
 
     # 3. preceding transitions
-    lines.append("## 3. Hurst preceding regime transitions")
+    lines.append("## 3. Efficiency Ratio preceding regime transitions")
     lines.append("")
     lines.append(
-        "Nearest Hurst sample at or before each transition's observed_at, grouped "
-        "by the transition's `to_state` -- \"what did Hurst look like right before "
-        "the market resolved into this regime.\""
+        "Nearest ER sample at or before each transition's observed_at, grouped by "
+        "the transition's `to_state` -- \"what did ER look like right before the "
+        "market resolved into this regime.\""
     )
     lines.append("")
     lines.append("| Resolving into | n | Mean | Median | Stdev | P25 | P75 |")
@@ -437,13 +447,13 @@ def render_hurst_report_markdown(
         lines.append("")
 
     # 4. by session
-    lines.append("## 4. Hurst by session")
+    lines.append("## 4. Efficiency Ratio by session")
     lines.append("")
     lines.append(
         "Telemetry only -- vo.observation.regime's classifier never sees session "
-        "boundaries; this is an observation about where Hurst's OWN values fall, "
-        "not evidence session should become a classifier input (same posture as "
-        "regime_validation.py's own session breakdown)."
+        "boundaries; this is an observation about where ER's OWN values fall, not "
+        "evidence session should become a classifier input (same posture as "
+        "hurst_report.py's and regime_validation.py's own session breakdowns)."
     )
     lines.append("")
     lines.append("| Session | n | Mean | Median | Stdev | P25 | P75 |")
@@ -474,7 +484,7 @@ def render_hurst_report_markdown(
     lines.append("")
 
     # 6. deferred
-    lines.append("## 6. Hurst by timeframe — deferred")
+    lines.append("## 6. Efficiency Ratio by timeframe — deferred")
     lines.append("")
     lines.append(
         "Not built: this pipeline runs entirely on the native M1 bar stream and "
@@ -487,15 +497,15 @@ def render_hurst_report_markdown(
     lines.append("## Conclusions this report deliberately does not draw")
     lines.append("")
     lines.append(
-        "This report does not propose a threshold rule, does not declare Hurst "
-        "'separates' the regimes, and does not recommend any change to the "
-        "classifier. Read the Mann-Whitney comparisons above as \"worth "
-        "investigating further,\" never as \"validated.\" The next step in the "
-        "user's own plan is the same standalone characterization for Efficiency "
-        "Ratio (Phase 15b), then a conditional Markov study (Phase 17), then HMM "
-        "(S17a) -- only after all four exist does a comparative/relationship study "
-        "become appropriate, and even then: \"Don't let the quantitative models "
-        "vote on the regime. At least initially.\""
+        "This report does not propose a threshold rule, does not declare ER "
+        "'separates' the regimes, does not check the existing anticipation-lean "
+        "thresholds (er_trend_threshold/er_chop_threshold), and does not recommend "
+        "any change to the classifier. Read the Mann-Whitney comparisons above as "
+        "\"worth investigating further,\" never as \"validated.\" The next step in "
+        "the user's own plan is the conditional Markov transition study (Phase 17), "
+        "then HMM (S17a) -- only after all four independent characterizations exist "
+        "does a comparative/relationship study become appropriate, and even then: "
+        "\"Don't let the quantitative models vote on the regime. At least initially.\""
     )
 
     return "\n".join(lines)
