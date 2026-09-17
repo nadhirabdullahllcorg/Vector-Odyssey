@@ -9,6 +9,22 @@ that pullback actually resolved. Consumes the engine's own output
 (RegimeSegments + the RegimeState log); invents no classification of its
 own (gate G2). Layer 7 (telemetry); pure and testable, the markdown
 rendering kept separate from the computation.
+
+SESSION BREAKDOWN. The classifier itself has no session concept -- it
+sees only a bounded CandleWindow (gate G3) and decides regime purely from
+structure. That is deliberate, not an oversight, but it also means
+nothing here could previously say WHETHER regime duration actually
+differs by session, only that the classifier does not care. build_session_
+breakdown answers that empirically: it attributes each bar's already-
+computed regime to the session `vo.time.sessions.session_at` reports for
+that same instant -- the SAME config the live EA runtime applies
+(VOTimeEngine.context_for uses the identical utc.astimezone(zone) ->
+session_at lookup), so backtest and live cannot silently disagree about
+what session an instant belongs to. This is additive telemetry only
+(gate G2): it changes nothing about how a regime is classified, only how
+the report slices what already happened. Whether the classifier itself
+should ever treat a session boundary as meaningful is a separate, G6-
+gated design question this module does not answer.
 """
 
 from __future__ import annotations
@@ -19,6 +35,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from vo.market.bar import Bar
 from vo.observation.regime import (
     AnticipatedResolution,
     RegimeState,
@@ -26,9 +43,11 @@ from vo.observation.regime import (
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
+from vo.time.sessions import SessionConfig, session_at
 
 _ER_FEATURE = "efficiency_ratio"
 _HURST_FEATURE = "hurst_exponent"
+_OFF_SESSION = "OFF_SESSION"
 
 
 @dataclass(frozen=True)
@@ -54,6 +73,33 @@ class RegimeStats:
     mean_efficiency_ratio: float | None
     mean_hurst: float | None
     is_momentary: bool = False
+
+
+@dataclass(frozen=True)
+class SessionRegimeStats:
+    """One (session, regime) cell of the backtest, attributed bar-by-bar
+    using the SAME vo.time.sessions config the live EA runtime applies --
+    no new session logic, purely additive telemetry (gate G2). Answers
+    whether regime time concentrates in particular sessions, which the
+    aggregate distribution table above cannot show, without changing what
+    "regime" means or how it is classified.
+
+    `regime` is None for bars the engine had not yet classified (before
+    its first RegimeState -- e.g. swing/ER/Hurst warmup at the very start
+    of the history). `session` is "OFF_SESSION" for a bar whose New York
+    wall-clock time falls outside every configured window (US100 has one:
+    the daily ~16:00-18:00 ET gap between NY_PM and ASIA in
+    config/settings/sessions.yaml). `segments_started` counts distinct
+    regime runs that began in this session -- a cheap proxy for "how often
+    does a regime change originate here", separate from how much time it
+    then occupies."""
+
+    session: str
+    regime: RegimeType | None
+    bar_count: int
+    total_minutes: float
+    share_of_session: float  # of this session's own classified bar-time, [0, 1]
+    segments_started: int
 
 
 @dataclass(frozen=True)
@@ -83,6 +129,7 @@ class RegimeReport:
     per_regime: tuple[RegimeStats, ...]
     transitions: tuple[tuple[RegimeType, RegimeType, int], ...]
     anticipation: AnticipationAccuracy
+    per_session: tuple[SessionRegimeStats, ...] = ()
 
 
 def _feature_value(state: RegimeState, name: str) -> float | None:
@@ -96,6 +143,77 @@ def _mean_or_none(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def build_session_breakdown(
+    segments: Sequence[RegimeSegment],
+    bars: Sequence[Bar],
+    session_config: SessionConfig,
+    *,
+    minutes_per_bar: float = 1.0,
+) -> tuple[SessionRegimeStats, ...]:
+    """Bar-level (session, regime) attribution -- see the module and
+    SessionRegimeStats docstrings for what this is and why it is safe
+    (gate G2: telemetry only, invents no session or classifier logic).
+
+    Segments tile the bars contiguously, in chronological order, by
+    build_regime_segments' own contract (each run's end_utc == the next
+    run's start_utc; the final run's end_utc is None and extends to
+    whatever the last bar is). This does one linear merge pass over
+    `bars` against that tiling: a bar's regime is whichever segment's
+    [start_utc, end_utc) contains its open_time_utc, or None if it falls
+    before the first segment ever starts (or there are no segments at
+    all -- an empty history, or one still warming up)."""
+    ordered_segments = sorted(segments, key=lambda s: s.start_utc)
+    n_segs = len(ordered_segments)
+
+    bar_counts: Counter[tuple[str, RegimeType | None]] = Counter()
+    seg_idx = 0
+    for bar in bars:
+        t = bar.open_time_utc
+        while seg_idx < n_segs - 1:
+            current_end = ordered_segments[seg_idx].end_utc
+            if current_end is None or t < current_end:
+                break
+            seg_idx += 1
+
+        regime: RegimeType | None = None
+        if seg_idx < n_segs and t >= ordered_segments[seg_idx].start_utc:
+            seg = ordered_segments[seg_idx]
+            if seg.end_utc is None or t < seg.end_utc:
+                regime = seg.regime
+
+        window = session_at(t.astimezone(session_config.zone), session_config)
+        session_name = window.name if window is not None else _OFF_SESSION
+        bar_counts[(session_name, regime)] += 1
+
+    starts: Counter[tuple[str, RegimeType]] = Counter()
+    for seg in ordered_segments:
+        window = session_at(seg.start_utc.astimezone(session_config.zone), session_config)
+        session_name = window.name if window is not None else _OFF_SESSION
+        starts[(session_name, seg.regime)] += 1
+
+    session_totals: Counter[str] = Counter()
+    for (session_name, _regime), n in bar_counts.items():
+        session_totals[session_name] += n
+
+    stats: list[SessionRegimeStats] = []
+    for (session_name, regime), bar_count in sorted(
+        bar_counts.items(),
+        key=lambda kv: (kv[0][0], kv[0][1].name if kv[0][1] is not None else ""),
+    ):
+        total = session_totals[session_name]
+        stats.append(
+            SessionRegimeStats(
+                session=session_name,
+                regime=regime,
+                bar_count=bar_count,
+                total_minutes=bar_count * minutes_per_bar,
+                share_of_session=(bar_count / total) if total else 0.0,
+                segments_started=starts.get((session_name, regime), 0) if regime else 0,
+            )
+        )
+    return tuple(stats)
+
+
 def build_regime_report(
     segments: tuple[RegimeSegment, ...],
     states: tuple[RegimeState, ...],
@@ -104,6 +222,8 @@ def build_regime_report(
     history_end_utc: datetime | None,
     minutes_per_bar: float = 1.0,
     bar_count: int = 0,
+    bars: Sequence[Bar] = (),
+    session_config: SessionConfig | None = None,
 ) -> RegimeReport:
     """Summarize a regime backtest. `history_end_utc` closes the final,
     open-ended segment for duration accounting (its own end_utc is None);
@@ -118,7 +238,12 @@ def build_regime_report(
     then look like one phantom PULLBACK_UNRESOLVED -> EXPANSION, or -- if
     the market re-entered a pullback immediately -- a PULLBACK_UNRESOLVED
     -> PULLBACK_UNRESOLVED that never actually happened as a state
-    transition. The real log has no such gap."""
+    transition. The real log has no such gap.
+
+    `bars` and `session_config` are both optional and additive: pass both
+    to also get a per-session breakdown (see build_session_breakdown);
+    leave either out and `per_session` is simply empty, same report as
+    before this existed."""
     del minutes_per_bar  # durations are wall-clock; kept for signature clarity
 
     # Duration per segment, in minutes of wall-clock. RETRACEMENT/REVERSAL
@@ -186,6 +311,12 @@ def build_regime_report(
 
     anticipation = _anticipation_accuracy(states)
 
+    per_session = (
+        build_session_breakdown(segments, bars, session_config)
+        if session_config is not None and bars
+        else ()
+    )
+
     return RegimeReport(
         instrument_key=segments[0].instrument_key if segments else "?",
         timeframe_canonical=segments[0].timeframe_canonical if segments else "?",
@@ -196,6 +327,7 @@ def build_regime_report(
         per_regime=tuple(per_regime),
         transitions=transitions,
         anticipation=anticipation,
+        per_session=per_session,
     )
 
 
@@ -300,6 +432,28 @@ def render_report_markdown(report: RegimeReport) -> str:
     else:
         lines.append("_No regime changes in this history._")
     lines.append("")
+
+    if report.per_session:
+        lines.append("## Session breakdown")
+        lines.append("")
+        lines.append(
+            "Bar-by-bar attribution of already-classified regime time to the "
+            "session it fell in (config/settings/sessions.yaml -- the same "
+            "config the live EA runtime applies). Telemetry only (gate G2): "
+            "the classifier above never sees session boundaries; this only "
+            "shows whether its output happens to concentrate by session."
+        )
+        lines.append("")
+        lines.append("| Session | Regime | Bars | Total min | Share of session | Runs started |")
+        lines.append("|---|---|--:|--:|--:|--:|")
+        for row in report.per_session:
+            regime_name = row.regime.name if row.regime is not None else "(unclassified)"
+            lines.append(
+                f"| {row.session} | {regime_name} | {row.bar_count} | "
+                f"{row.total_minutes:.0f} | {row.share_of_session * 100:.1f}% | "
+                f"{row.segments_started} |"
+            )
+        lines.append("")
 
     a = report.anticipation
     lines.append("## Anticipation lean accuracy")

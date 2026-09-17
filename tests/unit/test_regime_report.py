@@ -4,8 +4,9 @@ the anticipation-lean accuracy, all over hand-built inputs."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
+from vo.market.bar import Bar
 from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.observation.regime import (
@@ -19,7 +20,8 @@ from vo.observation.regime import (
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
-from vo.telemetry.regime_report import build_regime_report
+from vo.telemetry.regime_report import build_regime_report, build_session_breakdown
+from vo.time.sessions import SessionConfig, SessionWindow
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="Test", broker_symbol="US100")
 
@@ -87,6 +89,37 @@ def _transition(from_state: RegimeType, to_state: RegimeType, minute: int) -> Re
         from_state=from_state,
         to_state=to_state,
         evidence="test",
+    )
+
+
+def _bar(minute: int) -> Bar:
+    return Bar(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        open_time_utc=_at(minute),
+        open=10.0,
+        high=10.5,
+        low=9.5,
+        close=10.0,
+        tick_volume=1,
+        real_volume=0,
+        spread=1,
+    )
+
+
+def _session_config() -> SessionConfig:
+    """A trivial UTC two-window config -- MORNING 00:00-00:30, AFTERNOON
+    00:30-01:00 -- so test wall-clock == UTC and the arithmetic stays
+    readable. Not real US100 config; that lives in sessions.yaml."""
+    return SessionConfig(
+        instrument_symbol="TEST",
+        timezone="UTC",
+        trading_day_opens=time(0, 0),
+        sessions=(
+            SessionWindow(name="MORNING", start=time(0, 0), end=time(0, 30)),
+            SessionWindow(name="AFTERNOON", start=time(0, 30), end=time(1, 0)),
+        ),
+        rth=SessionWindow(name="RTH", start=time(0, 0), end=time(1, 0)),
     )
 
 
@@ -230,3 +263,72 @@ def test_anticipation_accuracy_matches_lean_against_outcome() -> None:
     assert a.leaned == 2
     assert a.matched == 1
     assert a.rate == 0.5
+
+
+def test_session_breakdown_attributes_bar_time_by_wall_clock_window() -> None:
+    """60 one-minute bars, CONSOLIDATION for the first 20, EXPANSION (open
+    -ended) after that. MORNING covers wall-clock minutes 0-29, AFTERNOON
+    30-59, so MORNING should see a CONSOLIDATION/EXPANSION split and
+    AFTERNOON should be pure EXPANSION."""
+    segments = (
+        _seg(RegimeType.CONSOLIDATION, 0, 20),
+        _seg(RegimeType.EXPANSION, 20, None),
+    )
+    bars = tuple(_bar(m) for m in range(60))
+    stats = build_session_breakdown(segments, bars, _session_config())
+    by_cell = {(s.session, s.regime): s for s in stats}
+
+    assert by_cell[("MORNING", RegimeType.CONSOLIDATION)].bar_count == 20
+    assert by_cell[("MORNING", RegimeType.EXPANSION)].bar_count == 10
+    assert by_cell[("AFTERNOON", RegimeType.EXPANSION)].bar_count == 30
+    assert ("AFTERNOON", RegimeType.CONSOLIDATION) not in by_cell
+
+    # Shares are of that session's own total, not the whole backtest.
+    morning_cons = by_cell[("MORNING", RegimeType.CONSOLIDATION)]
+    morning_exp = by_cell[("MORNING", RegimeType.EXPANSION)]
+    assert abs(morning_cons.share_of_session - 20 / 30) < 1e-9
+    assert abs(morning_exp.share_of_session - 10 / 30) < 1e-9
+    afternoon_exp = by_cell[("AFTERNOON", RegimeType.EXPANSION)]
+    assert afternoon_exp.share_of_session == 1.0
+
+    # Each regime run counted where it STARTED, not where it later ran.
+    assert morning_cons.segments_started == 1  # CONSOLIDATION starts at minute 0
+    assert morning_exp.segments_started == 1  # EXPANSION starts at minute 20, still MORNING
+    assert afternoon_exp.segments_started == 0  # EXPANSION did not start in AFTERNOON
+
+
+def test_session_breakdown_marks_bars_before_first_segment_unclassified() -> None:
+    """Bars before the engine ever emitted a state (warmup) get regime
+    None, not silently folded into whichever regime came first."""
+    segments = (_seg(RegimeType.EXPANSION, 10, None),)
+    bars = tuple(_bar(m) for m in range(15))
+    stats = build_session_breakdown(segments, bars, _session_config())
+    by_cell = {(s.session, s.regime): s for s in stats}
+
+    assert by_cell[("MORNING", None)].bar_count == 10  # minutes 0-9
+    assert by_cell[("MORNING", RegimeType.EXPANSION)].bar_count == 5  # minutes 10-14
+
+
+def test_build_regime_report_wires_session_breakdown_when_given_bars_and_config() -> None:
+    """The report only computes a session breakdown when both `bars` and
+    `session_config` are supplied -- omit either and `per_session` stays
+    empty (same report as before this feature existed)."""
+    segments = (_seg(RegimeType.EXPANSION, 0, None),)
+    bars = tuple(_bar(m) for m in range(5))
+
+    without = build_regime_report(
+        segments, (), transitions_log=(), history_end_utc=_at(5), bar_count=5
+    )
+    assert without.per_session == ()
+
+    with_config = build_regime_report(
+        segments,
+        (),
+        transitions_log=(),
+        history_end_utc=_at(5),
+        bar_count=5,
+        bars=bars,
+        session_config=_session_config(),
+    )
+    assert with_config.per_session != ()
+    assert sum(s.bar_count for s in with_config.per_session) == 5

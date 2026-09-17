@@ -52,6 +52,7 @@ from vo.telemetry.regime_feed import (  # noqa: E402
 )
 from vo.telemetry.regime_report import build_regime_report, render_report_markdown  # noqa: E402
 from vo.time.brokers import load_broker_profiles, resolve_broker_utc  # noqa: E402
+from vo.time.sessions import load_session_configs  # noqa: E402
 
 SWINGS_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "swings.yaml"
 REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
@@ -113,6 +114,9 @@ def main() -> None:
                 f"configured -- add it to brokers.yaml"
             )
         profile = next(iter(profiles.values()))
+
+    session_configs = load_session_configs(config.sessions_path)
+    session_config = session_configs.get(config.broker_symbol)
 
     instrument_id = InstrumentId(
         platform="MT5", broker_server=server, broker_symbol=config.broker_symbol
@@ -181,6 +185,8 @@ def main() -> None:
         transitions_log=transitions_log,
         history_end_utc=history_end,
         bar_count=len(sequence),
+        bars=sequence.bars,
+        session_config=session_config,
     )
     markdown = render_report_markdown(report)
     report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
@@ -189,6 +195,8 @@ def main() -> None:
     print(f"bars used:        {len(sequence)} (of {len(rates)} pulled)")
     print(f"regime segments:  {len(segments)}")
     print(f"regime markers:   {len(markers)} (RETRACEMENT/REVERSAL resolution points)")
+    if session_config is None:
+        print(f"session breakdown: skipped (no session config for {config.broker_symbol!r})")
     print(f"feed written:     {feed_path}")
     print(f"report written:   {report_path}")
     print()
