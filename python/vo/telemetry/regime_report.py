@@ -43,11 +43,10 @@ from vo.observation.regime import (
     RegimeType,
 )
 from vo.telemetry.regime_feed import RegimeSegment
-from vo.time.sessions import SessionConfig, session_at
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
 
 _ER_FEATURE = "efficiency_ratio"
 _HURST_FEATURE = "hurst_exponent"
-_OFF_SESSION = "OFF_SESSION"
 
 
 @dataclass(frozen=True)
@@ -182,13 +181,13 @@ def build_session_breakdown(
                 regime = seg.regime
 
         window = session_at(t.astimezone(session_config.zone), session_config)
-        session_name = window.name if window is not None else _OFF_SESSION
+        session_name = window.name if window is not None else OFF_SESSION_LABEL
         bar_counts[(session_name, regime)] += 1
 
     starts: Counter[tuple[str, RegimeType]] = Counter()
     for seg in ordered_segments:
         window = session_at(seg.start_utc.astimezone(session_config.zone), session_config)
-        session_name = window.name if window is not None else _OFF_SESSION
+        session_name = window.name if window is not None else OFF_SESSION_LABEL
         starts[(session_name, seg.regime)] += 1
 
     session_totals: Counter[str] = Counter()

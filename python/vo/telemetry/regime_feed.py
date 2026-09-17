@@ -55,6 +55,19 @@ back to (gate G8). Every feed line (band or marker) now starts with an
 explicit "BAND"/"MARK" tag rather than relying on field-count alone to
 tell them apart -- the field count still differs too, but the tag is
 the primary, more robust discriminant on the MQL5 side.
+
+SESSION BOUNDARIES (v3). A session transition is "a clock event, nothing
+more" (architecture/vo-time-engine.md §4) -- it carries no canonical
+record and plays no role in RegimeEngine (gate G2: the classifier never
+sees it). build_session_boundaries walks the same bars against
+vo.time.sessions.session_at (the identical lookup
+vo.telemetry.regime_report's session breakdown and the live EA runtime's
+VOTimeEngine both use, so no two surfaces can silently disagree about
+what session an instant is in) and emits one SessionBoundary wherever
+consecutive bars' sessions differ. VO_Regime.mq5 draws these as thin
+vertical lines so a regime band or marker can be read directly against
+the session it fell in on the same chart -- purely an aid to reading the
+chart, changing nothing about how a regime is classified.
 """
 
 from __future__ import annotations
@@ -70,8 +83,9 @@ from vo.observation.regime import (
     RegimeState,
     RegimeType,
 )
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
 
-FEED_VERSION = 2
+FEED_VERSION = 3
 FEED_DELIMITER = "|"
 _COMMENT_PREFIX = "#"
 
@@ -233,13 +247,52 @@ def build_regime_markers(
     return tuple(markers)
 
 
+@dataclass(frozen=True)
+class SessionBoundary:
+    """One session-to-session transition instant -- a pure clock fact
+    (architecture/vo-time-engine.md §4: "session transitions are
+    temporal events, nothing more"), not a canonical record and not an
+    input to RegimeEngine (gate G2). `from_session`/`to_session` are
+    session names, or OFF_SESSION_LABEL for a bar outside every
+    configured window (e.g. US100's daily ~16:00-18:00 ET gap)."""
+
+    at_utc: datetime
+    from_session: str
+    to_session: str
+
+
+def build_session_boundaries(
+    bars: Sequence[Bar],
+    session_config: SessionConfig,
+) -> tuple[SessionBoundary, ...]:
+    """One SessionBoundary per bar whose session differs from the bar
+    immediately before it. Uses the exact same vo.time.sessions.session_at
+    lookup as vo.telemetry.regime_report's session breakdown and the live
+    EA runtime's VOTimeEngine -- no second session concept invented here,
+    so the chart lines and the report table can never disagree about what
+    session an instant belongs to."""
+    boundaries: list[SessionBoundary] = []
+    previous: str | None = None
+    for bar in bars:
+        window = session_at(bar.open_time_utc.astimezone(session_config.zone), session_config)
+        current = window.name if window is not None else OFF_SESSION_LABEL
+        if previous is not None and current != previous:
+            boundaries.append(
+                SessionBoundary(at_utc=bar.open_time_utc, from_session=previous, to_session=current)
+            )
+        previous = current
+    return tuple(boundaries)
+
+
 _BAND_TAG = "BAND"
 _MARK_TAG = "MARK"
+_SESN_TAG = "SESN"
 
 
 def feed_header(
     segments: Sequence[RegimeSegment],
     markers: Sequence[RegimeMarker] = (),
+    boundaries: Sequence[SessionBoundary] = (),
     *,
     generated_utc: datetime,
 ) -> str:
@@ -254,7 +307,7 @@ def feed_header(
         f"{_COMMENT_PREFIX} VO_REGIME_FEED v{FEED_VERSION} "
         f"instrument={instrument} timeframe={timeframe} "
         f"generated_utc={generated_utc.isoformat()} "
-        f"segments={len(segments)} markers={len(markers)}"
+        f"segments={len(segments)} markers={len(markers)} boundaries={len(boundaries)}"
     )
 
 
@@ -318,15 +371,31 @@ def marker_line(marker: RegimeMarker, *, at_epoch: int) -> str:
     return FEED_DELIMITER.join(fields)
 
 
+def session_boundary_line(boundary: SessionBoundary, *, at_epoch: int) -> str:
+    """One pipe-delimited session-boundary line: a "SESN" tag then three
+    fields (four total) -- fewer fields than either BAND or MARK, so a
+    parser counting fields alone still cannot confuse it with either.
+
+    Fields: SESN | at_epoch | from_session | to_session. Carries no
+    object_id: a session transition traces back to no canonical record
+    (it is a clock fact, not an engine output) -- vo.time.sessions is
+    the one source of truth for it, same as the report's session
+    breakdown uses.
+    """
+    fields = [_SESN_TAG, str(at_epoch), boundary.from_session, boundary.to_session]
+    return FEED_DELIMITER.join(fields)
+
+
 def render_feed_lines(
     segments: Sequence[RegimeSegment],
     markers: Sequence[RegimeMarker] = (),
+    boundaries: Sequence[SessionBoundary] = (),
     *,
     epoch_of: Callable[[datetime], int],
     generated_utc: datetime,
 ) -> list[str]:
-    """Full feed content: one provenance header, then one line per band
-    or marker, in chronological order (bands and markers interleaved by
+    """Full feed content: one provenance header, then one line per band,
+    marker, or session boundary, in chronological order (interleaved by
     their own time so the file reads sensibly top to bottom).
 
     `epoch_of` maps a resolved UTC instant to the broker-server epoch
@@ -334,7 +403,7 @@ def render_feed_lines(
     tests that don't care about broker offset). The open-ended final band
     emits end_epoch 0.
     """
-    lines = [feed_header(segments, markers, generated_utc=generated_utc)]
+    lines = [feed_header(segments, markers, boundaries, generated_utc=generated_utc)]
 
     events: list[tuple[datetime, str]] = []
     for segment in segments:
@@ -345,6 +414,10 @@ def render_feed_lines(
         )
     for marker in markers:
         events.append((marker.at_utc, marker_line(marker, at_epoch=epoch_of(marker.at_utc))))
+    for boundary in boundaries:
+        events.append(
+            (boundary.at_utc, session_boundary_line(boundary, at_epoch=epoch_of(boundary.at_utc)))
+        )
     events.sort(key=lambda pair: pair[0])
 
     lines.extend(line for _when, line in events)

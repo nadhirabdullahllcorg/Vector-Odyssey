@@ -56,9 +56,11 @@ from vo.observation.swing_config import load_swing_config  # noqa: E402
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
     build_regime_segments,
+    build_session_boundaries,
     render_feed_lines,
 )
 from vo.time.brokers import BrokerProfile, load_broker_profiles, resolve_broker_utc  # noqa: E402
+from vo.time.sessions import load_session_configs  # noqa: E402
 
 SWINGS_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "swings.yaml"
 REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
@@ -175,6 +177,18 @@ def build_feed_lines(config: EAConfig) -> list[str]:
     # they get a point marker instead of a dropped band.
     markers = build_regime_markers(states, sequence.bars)
 
+    # Session-boundary lines: same config the live EA runtime uses (gate
+    # G2 telemetry -- see regime_feed's SESSION BOUNDARIES section). Not
+    # every deployment has a sessions.yaml entry for its symbol; skip
+    # quietly rather than fail the whole publish over a viz-only extra.
+    session_configs = load_session_configs(config.sessions_path)
+    session_config = session_configs.get(config.broker_symbol)
+    boundaries = (
+        build_session_boundaries(sequence.bars, session_config)
+        if session_config is not None
+        else ()
+    )
+
     def epoch_of(instant: datetime) -> int:
         epoch = broker_epoch_by_utc.get(instant)
         if epoch is None:
@@ -185,7 +199,7 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         return epoch
 
     return render_feed_lines(
-        segments, markers, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
+        segments, markers, boundaries, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
     )
 
 
@@ -213,7 +227,7 @@ def publish_once(config: EAConfig) -> int:
             if attempt == 9:
                 raise
             time.sleep(0.2)
-    event_count = max(len(lines) - 1, 0)  # minus the header; bands + markers
+    event_count = max(len(lines) - 1, 0)  # minus header; bands + markers + session lines
     return event_count
 
 
@@ -225,7 +239,8 @@ def main() -> None:
 
     if not watch:
         count = publish_once(config)
-        print(f"wrote {count} regime events (bands + markers) to {_feed_path(config)}")
+        events_desc = "bands + markers + session lines"
+        print(f"wrote {count} regime events ({events_desc}) to {_feed_path(config)}")
         return
 
     print(f"watching {config.bar_wire_path()} -- publishing regime feed (Ctrl+C to stop)")

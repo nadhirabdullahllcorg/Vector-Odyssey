@@ -48,6 +48,7 @@ from vo.observation.swing_config import load_swing_config  # noqa: E402
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
     build_regime_segments,
+    build_session_boundaries,
     render_feed_lines,
 )
 from vo.telemetry.regime_report import build_regime_report, render_report_markdown  # noqa: E402
@@ -166,13 +167,18 @@ def main() -> None:
     # -- build_regime_segments correctly drops their zero-width runs, so
     # they get a point marker instead of a dropped band.
     markers = build_regime_markers(states, sequence.bars)
+    boundaries = (
+        build_session_boundaries(sequence.bars, session_config)
+        if session_config is not None
+        else ()
+    )
 
     # 1. Full-history feed for VO_Regime.mq5.
     def epoch_of(instant: datetime) -> int:
         return broker_epoch_by_utc[instant]
 
     feed_lines = render_feed_lines(
-        segments, markers, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
+        segments, markers, boundaries, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
     )
     feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
     _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
@@ -197,6 +203,9 @@ def main() -> None:
     print(f"regime markers:   {len(markers)} (RETRACEMENT/REVERSAL resolution points)")
     if session_config is None:
         print(f"session breakdown: skipped (no session config for {config.broker_symbol!r})")
+        print("session lines:    skipped (no session config)")
+    else:
+        print(f"session lines:    {len(boundaries)} (session-boundary vertical lines)")
     print(f"feed written:     {feed_path}")
     print(f"report written:   {report_path}")
     print()

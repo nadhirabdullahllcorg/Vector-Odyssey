@@ -28,6 +28,14 @@ class SessionConfigError(ValueError):
     pass
 
 
+OFF_SESSION_LABEL = "OFF_SESSION"
+"""The label vo.telemetry.regime_report and vo.telemetry.regime_feed both
+use for an instant session_at reports None for (outside every configured
+window -- US100 has one, the daily ~16:00-18:00 ET gap between NY_PM and
+ASIA). Shared here so the report's session breakdown and the chart's
+session-boundary lines cannot silently disagree about the label."""
+
+
 def _parse_hhmm(value: str) -> time:
     hour_str, minute_str = value.split(":")
     return time(int(hour_str), int(minute_str))

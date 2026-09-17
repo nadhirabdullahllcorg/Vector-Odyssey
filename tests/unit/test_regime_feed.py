@@ -4,7 +4,7 @@ the MQL5 indicator parses; the RegimeEngine itself is tested elsewhere."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 
 import pytest
 
@@ -22,10 +22,13 @@ from vo.telemetry.regime_feed import (
     FEED_DELIMITER,
     build_regime_markers,
     build_regime_segments,
+    build_session_boundaries,
     feed_line,
     marker_line,
     render_feed_lines,
+    session_boundary_line,
 )
+from vo.time.sessions import SessionConfig, SessionWindow
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="Test-Server", broker_symbol="US100")
 
@@ -326,3 +329,66 @@ def test_render_feed_lines_tags_and_counts_bands_and_markers_separately() -> Non
             assert len(fields) == 7
         else:
             assert len(fields) == 10
+
+
+def _session_config() -> SessionConfig:
+    """UTC MORNING 00:00-00:03 / AFTERNOON 00:03-00:06 -- matches
+    _scenario()'s six one-minute bars so the boundary lands mid-scenario."""
+    return SessionConfig(
+        instrument_symbol="TEST",
+        timezone="UTC",
+        trading_day_opens=time(0, 0),
+        sessions=(
+            SessionWindow(name="MORNING", start=time(0, 0), end=time(0, 3)),
+            SessionWindow(name="AFTERNOON", start=time(0, 3), end=time(0, 6)),
+        ),
+        rth=SessionWindow(name="RTH", start=time(0, 0), end=time(0, 6)),
+    )
+
+
+def test_build_session_boundaries_emits_one_per_change_only() -> None:
+    _states, bars = _scenario()  # 6 bars, minutes 0-5
+    boundaries = build_session_boundaries(bars, _session_config())
+
+    # MORNING covers minutes 0-2, AFTERNOON covers 3-5 -- exactly one
+    # crossing, at minute 3, not one per bar.
+    assert len(boundaries) == 1
+    boundary = boundaries[0]
+    assert boundary.at_utc == _at(3)
+    assert boundary.from_session == "MORNING"
+    assert boundary.to_session == "AFTERNOON"
+
+
+def test_session_boundary_line_format() -> None:
+    _states, bars = _scenario()
+    boundary = build_session_boundaries(bars, _session_config())[0]
+
+    line = session_boundary_line(boundary, at_epoch=99)
+    fields = line.split(FEED_DELIMITER)
+    assert fields == ["SESN", "99", "MORNING", "AFTERNOON"]
+
+
+def test_render_feed_lines_interleaves_all_three_event_types() -> None:
+    states, bars = _scenario()
+    segments = build_regime_segments(states, bars)
+    markers = build_regime_markers(states, bars)
+    boundaries = build_session_boundaries(bars, _session_config())
+
+    lines = render_feed_lines(
+        segments,
+        markers,
+        boundaries,
+        epoch_of=lambda dt: int(dt.timestamp()),
+        generated_utc=datetime(2026, 1, 1, 0, 6, tzinfo=UTC),
+    )
+    assert f"boundaries={len(boundaries)}" in lines[0]
+    assert len(lines) == 1 + len(segments) + len(markers) + len(boundaries)
+
+    tags = [line.split(FEED_DELIMITER)[0] for line in lines[1:]]
+    assert tags.count("SESN") == len(boundaries)
+
+    # SESN lines never get mistaken for BAND/MARK by field count either.
+    for line in lines[1:]:
+        fields = line.split(FEED_DELIMITER)
+        if fields[0] == "SESN":
+            assert len(fields) == 4
