@@ -192,7 +192,18 @@ def publish_once(config: EAConfig) -> int:
     # reads a half-written feed.
     tmp = out_path.with_suffix(".feed.tmp")
     tmp.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
-    tmp.replace(out_path)
+    # os.replace can raise PermissionError (WinError 5) while the MT5
+    # indicator has the feed open for its periodic read -- MQL5's FileOpen
+    # grants no delete-sharing, so a concurrent rename is briefly refused.
+    # The terminal's read handle closes within milliseconds, so retry.
+    for attempt in range(10):
+        try:
+            tmp.replace(out_path)
+            break
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.2)
     band_count = max(len(lines) - 1, 0)  # minus the header
     return band_count
 
@@ -211,8 +222,12 @@ def main() -> None:
     print(f"watching {config.bar_wire_path()} -- publishing regime feed (Ctrl+C to stop)")
     try:
         while True:
-            count = publish_once(config)
-            print(f"{datetime.now(UTC).isoformat()} wrote {count} regime bands")
+            try:
+                count = publish_once(config)
+                print(f"{datetime.now(UTC).isoformat()} wrote {count} regime bands")
+            except PermissionError as exc:
+                # A stubborn file lock this cycle -- keep the watcher alive.
+                print(f"{datetime.now(UTC).isoformat()} feed busy, retrying next cycle: {exc}")
             time.sleep(config.wire.poll_interval_seconds)
     except KeyboardInterrupt:
         pass
