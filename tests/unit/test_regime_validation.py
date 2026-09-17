@@ -27,10 +27,6 @@ from vo.observation.regime import (
 from vo.telemetry.regime_feed import build_regime_segments
 from vo.telemetry.regime_report import durations_by_regime
 from vo.telemetry.regime_validation import (
-    _binomial_test,
-    _mann_whitney_u,
-    _percentile,
-    _wilson_score_interval,
     build_accuracy_validation,
     build_duration_distributions,
     build_evidence_comparison,
@@ -189,16 +185,9 @@ def test_transition_matrix_probability_is_none_for_a_from_state_never_seen() -> 
 
 
 # ── duration distributions ────────────────────────────────────────────────
-
-
-def test_percentile_matches_hand_computed_values() -> None:
-    values = [float(v) for v in range(10, 101, 10)]  # 10..100
-    assert _percentile(values, 50) == pytest.approx(55.0)
-    assert _percentile(values, 25) == pytest.approx(32.5)
-
-
-def test_percentile_falls_back_to_the_single_value_for_n_equals_1() -> None:
-    assert _percentile([42.0], 90) == 42.0
+#
+# percentile()'s own formula verification lives in
+# test_research_statistics.py now that it moved to vo.research.statistics.
 
 
 def test_build_duration_distributions_only_includes_regimes_with_real_duration() -> None:
@@ -214,48 +203,11 @@ def test_build_duration_distributions_only_includes_regimes_with_real_duration()
     assert dists[0].maximum == 40.0
 
 
-# ── Mann-Whitney U (formula verification) ────────────────────────────────
-
-
-def test_mann_whitney_u_on_completely_separated_groups() -> None:
-    result = _mann_whitney_u([1, 2, 3], [4, 5, 6], label="t")
-    assert result.u == pytest.approx(0.0)
-    assert result.z == pytest.approx(-1.9639610121239315)
-    assert result.p_value == pytest.approx(0.049534613435626706)
-
-
-def test_mann_whitney_u_on_identical_groups_gives_a_large_p_value() -> None:
-    result = _mann_whitney_u([1, 2, 3, 4, 5], [1, 2, 3, 4, 5], label="t")
-    assert result.p_value is not None
-    assert result.p_value > 0.5
-
-
-def test_mann_whitney_u_handles_empty_group() -> None:
-    result = _mann_whitney_u([], [1, 2, 3], label="t")
-    assert result.z is None
-    assert result.p_value is None
-
-
-# ── binomial test / Wilson interval (formula verification) ──────────────
-
-
-def test_binomial_test_matches_hand_computed_values() -> None:
-    result = _binomial_test(55, 100, 0.5)
-    assert result.z == pytest.approx(0.9)
-    assert result.p_value == pytest.approx(0.36812025069351906)
-
-
-def test_wilson_score_interval_matches_hand_computed_values() -> None:
-    low, high = _wilson_score_interval(55, 100)
-    assert low == pytest.approx(0.45244602997442135)
-    assert high == pytest.approx(0.6438546202048803)
-
-
-def test_wilson_score_interval_none_for_zero_n() -> None:
-    assert _wilson_score_interval(0, 0) is None
-
-
 # ── evidence comparison ───────────────────────────────────────────────────
+#
+# Mann-Whitney U / binomial test / Wilson interval formula verification
+# lives in test_research_statistics.py now that they moved to
+# vo.research.statistics.
 
 
 def test_build_evidence_comparison_groups_by_regime_and_feature() -> None:

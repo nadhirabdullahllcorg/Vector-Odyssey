@@ -67,7 +67,6 @@ NOT a substitute for holding out data after tuning starts.
 
 from __future__ import annotations
 
-import math
 import statistics
 from collections import Counter
 from collections.abc import Sequence
@@ -76,6 +75,14 @@ from datetime import datetime
 
 from vo.market.bar import Bar
 from vo.observation.regime import AnticipatedResolution, RegimeState, RegimeTransition, RegimeType
+from vo.research.statistics import (
+    BinomialTest,
+    MannWhitneyResult,
+    binomial_test,
+    mann_whitney_u,
+    percentile,
+    wilson_score_interval,
+)
 from vo.telemetry.regime_feed import RegimeSegment
 from vo.telemetry.regime_report import RegimeReport, build_regime_report
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
@@ -87,8 +94,6 @@ _HURST_FEATURE = "hurst_exponent"
 # fixed row/column order every rendered matrix and table uses, so two
 # reports are always visually comparable.
 _ALL_REGIMES: tuple[RegimeType, ...] = tuple(RegimeType)
-
-_Z95 = 1.959963984540054  # two-sided 95% normal quantile, for the Wilson interval
 
 
 def _feature_value(state: RegimeState, name: str) -> float | None:
@@ -211,16 +216,6 @@ class DurationDistribution:
     maximum: float
 
 
-def _percentile(values: Sequence[float], pct: int) -> float:
-    """The `pct`-th percentile (1-99) of `values`. Falls back to the
-    single value for n=1 (statistics.quantiles requires n>=2); callers
-    with n=0 must not call this."""
-    if len(values) == 1:
-        return values[0]
-    cuts = statistics.quantiles(values, n=100, method="inclusive")
-    return cuts[pct - 1]
-
-
 def build_duration_distributions(
     durations_by_regime: dict[RegimeType, list[float]],
 ) -> tuple[DurationDistribution, ...]:
@@ -237,11 +232,11 @@ def build_duration_distributions(
             DurationDistribution(
                 regime=regime,
                 n=len(values),
-                median=_percentile(values, 50),
-                p25=_percentile(values, 25),
-                p75=_percentile(values, 75),
-                p90=_percentile(values, 90),
-                p95=_percentile(values, 95),
+                median=percentile(values, 50),
+                p25=percentile(values, 25),
+                p75=percentile(values, 75),
+                p90=percentile(values, 90),
+                p95=percentile(values, 95),
                 minimum=min(values),
                 maximum=max(values),
             )
@@ -268,72 +263,6 @@ class EvidenceGroupStats:
 
 
 @dataclass(frozen=True)
-class MannWhitneyResult:
-    """Two-group rank-sum comparison (tie-corrected normal approximation --
-    see the module docstring for why this test and why the approximation
-    is appropriate here). `u` is U for the FIRST group passed in. A small
-    `p_value` means the two groups' distributions are unlikely to be
-    identical -- it says nothing about how much they overlap or whether
-    the difference is large enough to act on; read alongside the groups'
-    own EvidenceGroupStats (p25/p75) for that."""
-
-    label: str
-    n1: int
-    n2: int
-    u: float
-    z: float | None
-    p_value: float | None
-
-
-def _normal_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def _mann_whitney_u(x: Sequence[float], y: Sequence[float], *, label: str) -> MannWhitneyResult:
-    """Standard Mann-Whitney U with mid-rank tie correction and a normal
-    approximation for the p-value (two-sided). Pure stdlib; no scipy.
-    Accurate at these sample sizes (typically thousands per regime) --
-    the normal approximation to the U distribution is excellent well
-    before n1, n2 reach the low hundreds."""
-    n1, n2 = len(x), len(y)
-    if n1 == 0 or n2 == 0:
-        return MannWhitneyResult(label=label, n1=n1, n2=n2, u=float("nan"), z=None, p_value=None)
-
-    combined = sorted([(v, 0) for v in x] + [(v, 1) for v in y], key=lambda p: p[0])
-    n = n1 + n2
-    ranks = [0.0] * n
-    tie_term = 0.0
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and combined[j + 1][0] == combined[i][0]:
-            j += 1
-        avg_rank = (i + 1 + j + 1) / 2.0  # 1-based, averaged across the tie block
-        for k in range(i, j + 1):
-            ranks[k] = avg_rank
-        t = j - i + 1
-        if t > 1:
-            tie_term += t**3 - t
-        i = j + 1
-
-    rank_sum_x = sum(r for r, (_v, grp) in zip(ranks, combined, strict=True) if grp == 0)
-    u1 = rank_sum_x - n1 * (n1 + 1) / 2.0
-
-    mean_u = n1 * n2 / 2.0
-    var_u = (
-        (n1 * n2 / 12.0) * ((n + 1) - tie_term / (n * (n - 1))) if n > 1 else 0.0
-    )
-
-    if var_u <= 0:
-        z, p_value = None, None
-    else:
-        z = (u1 - mean_u) / math.sqrt(var_u)
-        p_value = min(1.0, 2.0 * (1.0 - _normal_cdf(abs(z))))
-
-    return MannWhitneyResult(label=label, n1=n1, n2=n2, u=u1, z=z, p_value=p_value)
-
-
-@dataclass(frozen=True)
 class EvidenceComparison:
     er_by_regime: tuple[EvidenceGroupStats, ...]
     hurst_by_regime: tuple[EvidenceGroupStats, ...]
@@ -349,8 +278,8 @@ def _group_stats(regime: RegimeType, feature: str, values: list[float]) -> Evide
         mean=statistics.fmean(values),
         median=statistics.median(values),
         stdev=statistics.stdev(values) if len(values) >= 2 else None,
-        p25=_percentile(values, 25),
-        p75=_percentile(values, 75),
+        p25=percentile(values, 25),
+        p75=percentile(values, 75),
     )
 
 
@@ -382,12 +311,12 @@ def build_evidence_comparison(states: Sequence[RegimeState]) -> EvidenceComparis
         if hurst_values.get(regime)
     )
 
-    er_mw = _mann_whitney_u(
+    er_mw = mann_whitney_u(
         er_values.get(RegimeType.RETRACEMENT, []),
         er_values.get(RegimeType.REVERSAL, []),
         label="efficiency_ratio: RETRACEMENT vs REVERSAL",
     )
-    hurst_mw = _mann_whitney_u(
+    hurst_mw = mann_whitney_u(
         hurst_values.get(RegimeType.RETRACEMENT, []),
         hurst_values.get(RegimeType.REVERSAL, []),
         label="hurst_exponent: RETRACEMENT vs REVERSAL",
@@ -401,16 +330,6 @@ def build_evidence_comparison(states: Sequence[RegimeState]) -> EvidenceComparis
 
 
 # ── 5. anticipation accuracy, class-imbalance-aware and sliced ──────────
-
-
-@dataclass(frozen=True)
-class BinomialTest:
-    """Normal-approximation two-sided test of an observed proportion
-    against a stated null rate -- accurate at these sample sizes."""
-
-    null_rate: float
-    z: float | None
-    p_value: float | None
 
 
 @dataclass(frozen=True)
@@ -440,35 +359,6 @@ class AccuracyValidation:
     by_session: tuple[AccuracySlice, ...]
     by_confidence_quartile: tuple[AccuracySlice, ...]
     by_pullback_duration_quartile: tuple[AccuracySlice, ...]
-
-
-def _binomial_test(successes: int, n: int, null_rate: float) -> BinomialTest | None:
-    if n == 0:
-        return BinomialTest(null_rate=null_rate, z=None, p_value=None)
-    mean = n * null_rate
-    var = n * null_rate * (1.0 - null_rate)
-    if var <= 0:
-        return BinomialTest(null_rate=null_rate, z=None, p_value=None)
-    # Continuity correction: move the observed count half a step toward
-    # the null mean before standardizing.
-    observed = successes + (0.5 if successes < mean else -0.5 if successes > mean else 0.0)
-    z = (observed - mean) / math.sqrt(var)
-    p_value = min(1.0, 2.0 * (1.0 - _normal_cdf(abs(z))))
-    return BinomialTest(null_rate=null_rate, z=z, p_value=p_value)
-
-
-def _wilson_score_interval(
-    successes: int, n: int, *, z: float = _Z95
-) -> tuple[float, float] | None:
-    if n == 0:
-        return None
-    p = successes / n
-    denom = 1.0 + z * z / n
-    centre = p + z * z / (2 * n)
-    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)
-    low = (centre - margin) / denom
-    high = (centre + margin) / denom
-    return (max(0.0, low), min(1.0, high))
 
 
 def _quartile_label(value: float, cuts: tuple[float, float, float]) -> str:
@@ -559,10 +449,10 @@ def build_accuracy_validation(
         majority_class = RegimeType.RETRACEMENT if to_ret >= to_rev else RegimeType.REVERSAL
         majority_baseline_rate = max(to_ret, to_rev) / resolutions
     if leaned:
-        vs_coin_flip = _binomial_test(matched, leaned, 0.5)
+        vs_coin_flip = binomial_test(matched, leaned, 0.5)
         if majority_baseline_rate is not None:
-            vs_majority = _binomial_test(matched, leaned, majority_baseline_rate)
-        wilson = _wilson_score_interval(matched, leaned)
+            vs_majority = binomial_test(matched, leaned, majority_baseline_rate)
+        wilson = wilson_score_interval(matched, leaned)
     else:
         vs_coin_flip = None
         wilson = None
