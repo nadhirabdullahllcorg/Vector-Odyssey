@@ -105,6 +105,14 @@ def main() -> None:
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
     regime_config = load_regime_config(REGIME_CONFIG_PATH)
 
+    print(
+        f"requesting up to {bar_cap} bars for {config.broker_symbol!r} from MT5 "
+        f"(cached bars return fast; anything the terminal has not already downloaded "
+        f"from the broker is fetched now, over the network, and can take a while for "
+        f"a deep request -- this is MT5's own history download, not this script)...",
+        flush=True,
+    )
+    _t_pull = time.monotonic()
     client = MT5ReadClient()
     client.connect()
     try:
@@ -113,6 +121,7 @@ def main() -> None:
         rates = client.copy_rates(config.broker_symbol, bar_cap)
     finally:
         client.shutdown()
+    print(f"  -> {len(rates)} bars pulled in {time.monotonic() - _t_pull:.1f}s", flush=True)
 
     profile = profiles.get(server)
     if profile is None:
@@ -166,7 +175,10 @@ def main() -> None:
         raise SystemExit("no usable bars returned from the terminal")
 
     engine = build_regime_engine(regime_config, swing_config, tick_size=symbol.tick_size)
+    print(f"replaying {len(sequence)} bars through the regime engine...", flush=True)
+    _t_replay = time.monotonic()
     ReplayHarness(sequence).run(engine)
+    print(f"  -> replay finished in {time.monotonic() - _t_replay:.1f}s", flush=True)
     states = engine.states.all()
     transitions_log = engine.transitions.all()
     segments = build_regime_segments(states, sequence.bars)
@@ -179,6 +191,9 @@ def main() -> None:
         if session_config is not None
         else ()
     )
+
+    print("building regime segments/markers/session boundaries and the report...", flush=True)
+    _t_build = time.monotonic()
 
     # 1. Full-history feed for VO_Regime.mq5.
     def epoch_of(instant: datetime) -> int:
@@ -204,6 +219,7 @@ def main() -> None:
     markdown = render_report_markdown(report)
     report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
     report_path.write_text(markdown, encoding="utf-8")
+    print(f"  -> feed/report built in {time.monotonic() - _t_build:.1f}s", flush=True)
 
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
