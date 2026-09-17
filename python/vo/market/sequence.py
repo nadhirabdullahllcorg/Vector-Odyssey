@@ -41,26 +41,48 @@ class BarSequence:
 
     bars: tuple[Bar, ...] = ()
 
+    @staticmethod
+    def _validate_next(bar: Bar, last: Bar | None) -> None:
+        """The ordering/identity invariants .append() and build_bar_sequence
+        both enforce, factored out so the two can never drift apart, and so
+        a bulk builder can apply them in one O(n) pass instead of paying an
+        O(n) tuple copy per bar via a .append() loop.
+
+        NOTE: no separate O(n) duplicate-bar_id scan here (there was one; it
+        made building a long sequence O(n^2) on top of the tuple-copy cost --
+        invisible at the ~500-bar live backfill, but a multi-hour hang
+        building a 100k-bar deep-history backtest). It is provably redundant,
+        not just slow: within one BarSequence, instrument_id/timeframe are
+        pinned to the first bar (the identity check below enforces this on
+        every append), so bar_id --
+        f"{instrument_id.key}:{timeframe.canonical}:{open_time_utc.isoformat()}"
+        (Bar.bar_id) -- collapses to a pure function of open_time_utc alone.
+        Any bar_id collision with an earlier bar therefore implies an
+        open_time_utc collision with an earlier bar, which (since
+        open_time_utc is strictly increasing) is always <= last.open_time_utc
+        -- exactly the condition the check below already raises on, one step
+        earlier, every time. See test_append_rejects_duplicate_bar_id_even_
+        when_not_the_immediate_predecessor in test_sequence.py, whose own
+        comment already notes this raises "either way".
+        """
+        if last is None:
+            return
+
+        if bar.instrument_id != last.instrument_id or bar.timeframe != last.timeframe:
+            raise BarSequenceViolation(
+                f"Bar {bar.bar_id!r} does not match this sequence's "
+                f"(instrument_id, timeframe): expected "
+                f"({last.instrument_id.key}, {last.timeframe.canonical})"
+            )
+
+        if bar.open_time_utc <= last.open_time_utc:
+            raise BarSequenceViolation(
+                f"Bar {bar.bar_id!r} at {bar.open_time_utc.isoformat()} is not "
+                f"strictly after the last bar at {last.open_time_utc.isoformat()}"
+            )
+
     def append(self, bar: Bar) -> BarSequence:
-        if self.bars:
-            last = self.bars[-1]
-
-            if bar.instrument_id != last.instrument_id or bar.timeframe != last.timeframe:
-                raise BarSequenceViolation(
-                    f"Bar {bar.bar_id!r} does not match this sequence's "
-                    f"(instrument_id, timeframe): expected "
-                    f"({last.instrument_id.key}, {last.timeframe.canonical})"
-                )
-
-            if bar.open_time_utc <= last.open_time_utc:
-                raise BarSequenceViolation(
-                    f"Bar {bar.bar_id!r} at {bar.open_time_utc.isoformat()} is not "
-                    f"strictly after the last bar at {last.open_time_utc.isoformat()}"
-                )
-
-        if any(existing.bar_id == bar.bar_id for existing in self.bars):
-            raise BarSequenceViolation(f"Duplicate bar_id: {bar.bar_id!r}")
-
+        self._validate_next(bar, self.bars[-1] if self.bars else None)
         return BarSequence(bars=(*self.bars, bar))
 
     def window_at(self, index: int) -> CandleWindow:
@@ -94,17 +116,31 @@ def build_bar_sequence(bars: Iterable[Bar]) -> BarSequenceResult:
     not aborting on) any bar that is a duplicate or out of order — the
     sequence-level counterpart to vo.market.mapping.map_records' record-
     level quarantine.
+
+    O(n): validates each bar against the running last-accepted bar via
+    BarSequence._validate_next and freezes the final tuple once, rather
+    than calling .append() in a loop -- that would copy the whole
+    accepted-so-far tuple on every bar (O(n) per call, O(n^2) overall),
+    fine for a live-scale backfill but the difference between seconds and
+    hours once a caller asks for deep, multi-year history.
     """
-    sequence = BarSequence()
+    accepted: list[Bar] = []
     quarantined: list[QuarantinedBar] = []
+    last: Bar | None = None
 
     for bar in bars:
         try:
-            sequence = sequence.append(bar)
+            BarSequence._validate_next(bar, last)
         except BarSequenceViolation as exc:
             quarantined.append(QuarantinedBar(bar=bar, reason=str(exc)))
+            continue
+        accepted.append(bar)
+        last = bar
 
-    return BarSequenceResult(sequence=sequence, quarantined=tuple(quarantined))
+    return BarSequenceResult(
+        sequence=BarSequence(bars=tuple(accepted)),
+        quarantined=tuple(quarantined),
+    )
 
 
 @dataclass(frozen=True)

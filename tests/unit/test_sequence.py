@@ -119,6 +119,26 @@ def test_append_rejects_duplicate_bar_id_even_when_not_the_immediate_predecessor
         seq.append(_bar(0))
 
 
+def test_build_bar_sequence_stays_linear_for_a_long_run():
+    """Regression guard: build_bar_sequence must not silently become O(n^2)
+    again. It once was (a per-bar duplicate scan, plus an .append()-in-a-
+    loop pattern that copied the whole accepted-so-far tuple on every bar) -
+    invisible at the ~500-bar live backfill scale, but a multi-hour hang
+    building a 100k-bar deep-history backtest. 8,000 bars must build in
+    well under a second on any reasonable machine; an O(n^2) regression
+    here would take tens of seconds at minimum."""
+    import time
+
+    bars = [_bar(m) for m in range(8000)]
+    started = time.time()
+    result = build_bar_sequence(bars)
+    elapsed = time.time() - started
+
+    assert len(result.sequence) == 8000
+    assert not result.quarantined
+    assert elapsed < 5.0
+
+
 # ── CandleWindow: structural queries ─────────────────────────────────────
 
 

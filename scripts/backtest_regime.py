@@ -41,7 +41,7 @@ from vo.core.replay import ReplayHarness  # noqa: E402
 from vo.market.bar import Bar  # noqa: E402
 from vo.market.identity import InstrumentId  # noqa: E402
 from vo.market.mt5 import MT5ReadClient  # noqa: E402
-from vo.market.sequence import BarSequence  # noqa: E402
+from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
@@ -114,7 +114,7 @@ def main() -> None:
         platform="MT5", broker_server=server, broker_symbol=config.broker_symbol
     )
 
-    sequence = BarSequence()
+    bars: list[Bar] = []
     broker_epoch_by_utc: dict[datetime, int] = {}
     for rate in rates:
         naive = datetime.fromtimestamp(rate.time_broker_epoch_s, tz=UTC).replace(tzinfo=None)
@@ -131,11 +131,20 @@ def main() -> None:
             real_volume=rate.real_volume,
             spread=rate.spread,
         )
-        try:
-            sequence = sequence.append(bar)
-        except ValueError:
-            continue  # out-of-order / duplicate -- skip, as the pipeline does
+        bars.append(bar)
         broker_epoch_by_utc[resolution.utc] = rate.time_broker_epoch_s
+
+    # build_bar_sequence quarantines out-of-order/duplicate bars instead of
+    # aborting (the same pipeline-level pattern -- see vo.market.sequence),
+    # and does it in O(n): a hand-rolled .append() loop over 100k bars would
+    # copy the whole accepted-so-far tuple on every bar (O(n^2) overall).
+    build_result = build_bar_sequence(bars)
+    sequence = build_result.sequence
+    if build_result.quarantined:
+        print(
+            f"quarantined {len(build_result.quarantined)} out-of-order/duplicate "
+            f"bar(s) out of {len(bars)} pulled -- kept the rest"
+        )
 
     if not sequence.bars:
         raise SystemExit("no usable bars returned from the terminal")
