@@ -57,7 +57,14 @@ from vo.time.sessions import load_session_configs  # noqa: E402
 
 SWINGS_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "swings.yaml"
 REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
-DEFAULT_BAR_CAP = 100_000
+# copy_rates_from_pos (vo.market.mt5.MT5ReadClient.copy_rates) returns
+# whatever the terminal actually has cached, up to this count -- asking
+# for more than exists is harmless (you get back what's available, not
+# an error), so this is deliberately a high ceiling, not a target. If
+# the terminal has less than this cached locally, scroll the chart back
+# in MT5 (or use its History Center) to force it to download more before
+# a bigger --bars actually returns more.
+DEFAULT_BAR_CAP = 1_000_000
 
 
 def _parse_args(argv: list[str]) -> tuple[str, int]:
@@ -198,7 +205,15 @@ def main() -> None:
     report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
     report_path.write_text(markdown, encoding="utf-8")
 
+    calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
+    trading_days = len(sequence) / 1440.0
+    coverage_pct = (trading_days / calendar_days * 100.0) if calendar_days > 0 else 100.0
     print(f"bars used:        {len(sequence)} (of {len(rates)} pulled)")
+    print(
+        f"calendar coverage: {trading_days:.1f} trading days of "
+        f"{calendar_days:.1f} calendar days ({coverage_pct:.1f}%) -- the rest is "
+        f"weekends/closures with zero bars, now correctly excluded from durations below"
+    )
     print(f"regime segments:  {len(segments)}")
     print(f"regime markers:   {len(markers)} (RETRACEMENT/REVERSAL resolution points)")
     if session_config is None:
