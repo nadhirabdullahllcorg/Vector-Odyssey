@@ -20,15 +20,16 @@
 //| feed and paints it. If a band looks wrong, the bug is in the       |
 //| Python engine or the feed, never here.                            |
 //|                                                                  |
-//| FEED FORMAT (vo.telemetry.regime_feed, v2). Lines beginning '#'    |
+//| FEED FORMAT (vo.telemetry.regime_feed, v3). Lines beginning '#'    |
 //| are provenance comments and are skipped. Every other line's FIRST  |
-//| field is a tag, "BAND" or "MARK", so the two can never be confused |
-//| even by field count alone:                                        |
+//| field is a tag -- "BAND", "MARK" or "SESN" -- so none of the three |
+//| can ever be confused even by field count alone:                   |
 //|                                                                  |
 //|   BAND | object_id | regime | direction | start_epoch | end_epoch |
 //|        | high | low | confidence | anticipated   (10 fields)      |
 //|   MARK | object_id | regime | direction | at_epoch | price |       |
 //|        confidence                        (7 fields)                |
+//|   SESN | at_epoch | from_session | to_session      (4 fields)      |
 //|                                                                  |
 //| - object_id: the real RegimeState.object_id (gate G8: the chart    |
 //|   object embeds it, so any band/marker is traceable to one          |
@@ -54,6 +55,14 @@
 //| whole model: exactly where an ambiguous pullback got resolved) is   |
 //| still worth seeing. A MARK line draws a small arrow there instead.  |
 //|                                                                  |
+//| WHY SESSION LINES EXIST. A session transition (ASIA->LONDON, etc)  |
+//| is "a clock event, nothing more" (vo-time-engine.md SS4) -- it      |
+//| carries no canonical record and plays no role in RegimeEngine       |
+//| (gate G2). It is drawn here purely so a band or marker can be read  |
+//| directly against the session it fell in, on the same chart, using  |
+//| the identical vo.time.sessions lookup the backtest report's         |
+//| session breakdown already uses -- never a second session concept.  |
+//|                                                                  |
 //| SCOPE: a Custom Indicator, not an Expert Advisor -- same reasoning |
 //| as VO_ReferenceLevels.mq5 / VO_Swings.mq5: indicators have no      |
 //| order API in MT5, so this cannot become a trade-decision path by   |
@@ -72,11 +81,11 @@
 //| leaves a stale object behind.                                     |
 //|                                                                  |
 //| COMPILE/VERIFY NOTE: not yet compiled or run against a live        |
-//| terminal from this session. Written to match VO_Swings.mq5's       |
-//| structure closely; needs the same validation: compile in           |
-//| MetaEditor, run scripts/publish_regime.py so the feed exists, then |
-//| attach to the matching chart and confirm the bands land on the     |
-//| right bars/prices.                                                |
+//| terminal from this session (v3, session lines added). Needs the    |
+//| same validation: compile in MetaEditor, run scripts/publish_regime |
+//| .py or backtest_regime.py so a v3 feed exists, remove/re-add this  |
+//| indicator once (v2 -> v3 orphans old objects, same as v1 -> v2     |
+//| did), and confirm bands/markers/session lines all land correctly.  |
 //+------------------------------------------------------------------+
 #property strict
 #property indicator_chart_window
@@ -84,15 +93,17 @@
 
 //--- Object naming/versioning -- same "bump on breaking change" rule as
 //    VO_SWG_PREFIX in VO_Swings.mq5 / VO_REF_PREFIX in VO_ReferenceLevels.mq5.
-//    v1 -> v2: feed format gained the BAND/MARK tag and resolution markers;
-//    old v1 chart objects are orphaned by this prefix bump, same as any
-//    other breaking change here -- remove/re-add the indicator once to
-//    clear them.
-#define VO_RGM_PREFIX "VO_RGM_v2"
+//    v1 -> v2: feed format gained the BAND/MARK tag and resolution markers.
+//    v2 -> v3: feed format gained the SESN session-boundary line. Each
+//    bump orphans the previous prefix's chart objects -- remove/re-add
+//    the indicator once after upgrading to clear them.
+#define VO_RGM_PREFIX "VO_RGM_v3"
 #define VO_TAG_BAND "BAND"
 #define VO_TAG_MARK "MARK"
+#define VO_TAG_SESN "SESN"
 #define VO_FEED_BAND_FIELDS 10
 #define VO_FEED_MARKER_FIELDS 7
+#define VO_FEED_SESSION_FIELDS 4
 
 input group "=== Feed source (MQL5\\Files\\<subdir>\\<symbol>_regime.feed) ==="
 input string InpFeedSubdir     = "VectorOdyssey"; // must match VO_Bridge InpOutputSubdir / vo_ea.yaml wire.dir
@@ -119,6 +130,12 @@ input group "=== Resolution markers (RETRACEMENT/REVERSAL confirm instants) ==="
 input int    InpRetracementArrowCode = 159;  // wingdings code, RETRACEMENT (continuation) -- small filled dot
 input int    InpReversalArrowCode    = 108;  // wingdings code, REVERSAL (structure shift) -- more prominent
 input int    InpMarkerSize           = 2;
+
+input group "=== Session boundary lines (ASIA/LONDON/NY_AM/NY_PM, config/settings/sessions.yaml) ==="
+input bool   InpShowSessionLines  = true;
+input color  InpSessionLineColor  = clrSlateGray;
+input int    InpSessionLineWidth  = 1;
+input bool   InpShowSessionLabel  = true;
 
 //--- Re-read bookkeeping (same pattern as VO_Swings.mq5's g_last_seen_bar_open).
 datetime g_last_seen_bar_open = 0;
@@ -229,6 +246,11 @@ void VO_ReadAndDraw()
       else if(f[0] == VO_TAG_MARK && n == VO_FEED_MARKER_FIELDS)
         {
          VO_DrawMarker(f, drawn);
+         drawn++;
+        }
+      else if(f[0] == VO_TAG_SESN && n == VO_FEED_SESSION_FIELDS && InpShowSessionLines)
+        {
+         VO_DrawSessionBoundary(f, drawn);
          drawn++;
         }
       // else: unrecognized tag or field-count drift -- skip defensively,
@@ -365,6 +387,62 @@ void VO_DrawMarker(const string &f[], const int ordinal)
    ObjectSetDouble(0, label_name, OBJPROP_PRICE, 0, price);
    ObjectSetString(0, label_name, OBJPROP_TEXT, label_text);
    ObjectSetInteger(0, label_name, OBJPROP_COLOR, clr);
+  }
+
+//+------------------------------------------------------------------+
+//| Draw one session-boundary vertical line from four already-split    |
+//| SESN fields. A thin, dotted line -- deliberately unobtrusive next   |
+//| to the regime bands/markers it is meant to give context to, not     |
+//| compete with. Carries no object_id (a session transition traces     |
+//| back to no canonical record -- see the file header's WHY SESSION    |
+//| LINES EXIST note); the tooltip/label show the transition itself.    |
+//+------------------------------------------------------------------+
+void VO_DrawSessionBoundary(const string &f[], const int ordinal)
+  {
+   // f[0] is the "SESN" tag (already checked by the caller).
+   const datetime at_t        = (datetime)StringToInteger(f[1]);
+   const string from_session  = f[2];
+   const string to_session    = f[3];
+
+   const string name = StringFormat("%s|SESN|%d|%d", VO_RGM_PREFIX, ordinal, (long)at_t);
+
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_VLINE, 0, at_t, 0);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_TIME, 0, at_t);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpSessionLineColor);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, InpSessionLineWidth);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+
+   const string tooltip = StringFormat("Session: %s -> %s", from_session, to_session);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip);
+
+   if(InpShowSessionLabel)
+     {
+      // Anchored at that bar's own high, just above it -- simple and
+      // robust (no chart-window price-range lookup needed), and it
+      // scrolls with the chart exactly like the vline itself does.
+      const int bar_shift = iBarShift(_Symbol, PERIOD_CURRENT, at_t, true);
+      const double bar_high = (bar_shift >= 0) ? iHigh(_Symbol, PERIOD_CURRENT, bar_shift) : 0.0;
+
+      const string label_name = name + "|lbl";
+      if(ObjectFind(0, label_name) < 0)
+        {
+         ObjectCreate(0, label_name, OBJ_TEXT, 0, at_t, bar_high);
+         ObjectSetInteger(0, label_name, OBJPROP_SELECTABLE, false);
+         ObjectSetInteger(0, label_name, OBJPROP_HIDDEN, true);
+         ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+         ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, InpFontSize);
+        }
+      ObjectSetInteger(0, label_name, OBJPROP_TIME, 0, at_t);
+      ObjectSetDouble(0, label_name, OBJPROP_PRICE, 0, bar_high);
+      ObjectSetString(0, label_name, OBJPROP_TEXT, to_session);
+      ObjectSetInteger(0, label_name, OBJPROP_COLOR, InpSessionLineColor);
+     }
   }
 
 //+------------------------------------------------------------------+
