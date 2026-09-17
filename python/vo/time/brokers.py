@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from functools import cache
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -70,9 +71,19 @@ def _find_ny_transition_instant(day: date) -> datetime:
     raise BrokerProfileError(f"No America/New_York DST transition found on {day}")
 
 
+@cache
 def dst_transition_instants(calendar: DstCalendar, year: int) -> tuple[datetime, datetime] | None:
     """(spring_forward_utc, fall_back_utc) for the given calendar and year,
-    or None when the calendar has no transitions (NONE/UNKNOWN)."""
+    or None when the calendar has no transitions (NONE/UNKNOWN).
+
+    Cached: a pure function of (calendar, year) -- US resolution scans two
+    full days minute-by-minute (_find_ny_transition_instant) to find the
+    exact transition instant, and resolve_broker_utc calls this once per
+    bar. Uncached, a deep-history backtest (one call per bar, almost
+    always the same 1-2 years) redid that scan hundreds of thousands of
+    times over -- the same invisible-at-500-bars, hours-at-100k-bars shape
+    as the BarSequence fix beside this one. DstCalendar is a small,
+    finite Enum and year is a plain int, so the cache is unbounded-safe."""
     if calendar is DstCalendar.US:
         start_date, end_date = us_dst_bounds(year)
         return _find_ny_transition_instant(start_date), _find_ny_transition_instant(end_date)
