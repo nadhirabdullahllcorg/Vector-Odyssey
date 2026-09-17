@@ -155,3 +155,58 @@ def wilson_score_interval(
     low = (centre - margin) / denom
     high = (centre + margin) / denom
     return (max(0.0, low), min(1.0, high))
+
+
+@dataclass(frozen=True)
+class GroupStats:
+    """Descriptive stats for one labeled group of values -- the generic
+    shape every research report's "distribution of X within bucket Y"
+    table needs (by regime, by session, by window length, by
+    before/after an out-of-sample split, ...). Introduced for Phase 15a's
+    Hurst report; regime_validation.py's own EvidenceGroupStats (a
+    narrower, ER/Hurst-specific predecessor) stays as-is rather than
+    being migrated mid-flight, since it is already shipped and verified
+    -- new callers should use this one."""
+
+    label: str
+    n: int
+    mean: float
+    median: float
+    stdev: float | None  # None when n < 2 -- statistics.stdev needs 2+ points
+    p25: float
+    p75: float
+    minimum: float
+    maximum: float
+
+
+def describe(values: Sequence[float], label: str) -> GroupStats:
+    """Build a GroupStats from a non-empty sequence of values. Callers
+    must not call this with an empty sequence (mean/median/min/max are
+    undefined) -- skip empty groups before calling, same convention as
+    regime_validation.py's own _group_stats."""
+    return GroupStats(
+        label=label,
+        n=len(values),
+        mean=statistics.fmean(values),
+        median=statistics.median(values),
+        stdev=statistics.stdev(values) if len(values) >= 2 else None,
+        p25=percentile(values, 25),
+        p75=percentile(values, 75),
+        minimum=min(values),
+        maximum=max(values),
+    )
+
+
+def lag1_autocorrelation(values: Sequence[float]) -> float | None:
+    """Correlation between consecutive values in `values` (assumed
+    already in their natural, e.g. chronological, order) -- a simple,
+    honest read on how noisy vs. stable a rolling estimate series is at
+    a given configuration (window length, stride, ...). None when there
+    are fewer than 3 points (statistics.correlation needs 2+ pairs) or
+    either half is constant (undefined correlation, not zero)."""
+    if len(values) < 3:
+        return None
+    try:
+        return statistics.correlation(values[:-1], values[1:])
+    except statistics.StatisticsError:
+        return None
