@@ -374,6 +374,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.core.pipeline",
         "vo.telemetry.publisher",
         "vo.telemetry.ea_runtime",
+        "vo.telemetry.regime_feed",
         "vo.observation",
         "vo.observation.atr",
         "vo.observation.swing_config",
