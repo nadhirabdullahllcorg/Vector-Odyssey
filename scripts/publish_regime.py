@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Publish a regime feed for VO_Regime.mq5 -- Phase 13a (Python computes,
+Publish a regime feed for VO_ReferenceLevels.mq5 -- Phase 13a (Python computes,
 the indicator reads a file).
 
     python scripts/publish_regime.py [config/settings/vo_ea.yaml] [--watch]
@@ -11,7 +11,7 @@ tails), resolves every bar's broker-server wall-clock to UTC via the
 real committed broker profile, runs the REAL vo.observation.regime
 RegimeEngine over the resulting BarSequence, and writes the emitted
 regime bands to <broker_symbol>_regime.feed in that same wire folder.
-VO_Regime.mq5, attached to the chart, reads that .feed file and draws
+VO_ReferenceLevels.mq5, attached to the chart, reads that .feed file and draws
 the bands. No classifier logic lives in MQL5 (gate G6 discipline); this
 is the one channel between them.
 
@@ -59,6 +59,7 @@ from vo.telemetry.regime_feed import (  # noqa: E402
     build_session_boundaries,
     render_feed_lines,
 )
+from vo.telemetry.regime_report import build_session_breakdown  # noqa: E402
 from vo.time.brokers import BrokerProfile, load_broker_profiles, resolve_broker_utc  # noqa: E402
 from vo.time.sessions import load_session_configs  # noqa: E402
 
@@ -188,6 +189,14 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         if session_config is not None
         else ()
     )
+    # Session-stat summary (v4 SSTAT lines): same breakdown the backtest
+    # report renders, reused here so the live chart panel and the offline
+    # report never disagree. Additive/optional exactly like `boundaries`.
+    session_stats = (
+        build_session_breakdown(segments, sequence.bars, session_config)
+        if session_config is not None
+        else ()
+    )
 
     def epoch_of(instant: datetime) -> int:
         epoch = broker_epoch_by_utc.get(instant)
@@ -199,7 +208,12 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         return epoch
 
     return render_feed_lines(
-        segments, markers, boundaries, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
+        segments,
+        markers,
+        boundaries,
+        session_stats,
+        epoch_of=epoch_of,
+        generated_utc=datetime.now(UTC),
     )
 
 
@@ -211,7 +225,7 @@ def publish_once(config: EAConfig) -> int:
     lines = build_feed_lines(config)
     out_path = _feed_path(config)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic-ish replace: write a temp then rename, so VO_Regime.mq5 never
+    # Atomic-ish replace: write a temp then rename, so VO_ReferenceLevels.mq5 never
     # reads a half-written feed.
     tmp = out_path.with_suffix(".feed.tmp")
     tmp.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")

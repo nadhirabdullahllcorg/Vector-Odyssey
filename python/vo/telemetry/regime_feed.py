@@ -2,7 +2,10 @@
 Regime chart feed -- Phase 13a viz-only channel (Python computes, the
 MQL5 indicator reads a file).
 
-WHAT THIS IS. VO_Regime.mq5 draws regime bands on an MT5 chart. It does
+WHAT THIS IS. VO_ReferenceLevels.mq5 draws regime bands on an MT5 chart
+(moved here from the now-retired VO_Regime.mq5 in v4, at the user's
+request, to consolidate all chart-drawing indicators into one file --
+see the SESSION-STAT SUMMARY note below). It does
 NOT re-implement the regime classifier -- that would be a second,
 drifting copy of vo.observation.regime. Instead the REAL RegimeEngine
 runs in Python (scripts/publish_regime.py), and this module turns its
@@ -64,10 +67,25 @@ vo.time.sessions.session_at (the identical lookup
 vo.telemetry.regime_report's session breakdown and the live EA runtime's
 VOTimeEngine both use, so no two surfaces can silently disagree about
 what session an instant is in) and emits one SessionBoundary wherever
-consecutive bars' sessions differ. VO_Regime.mq5 draws these as thin
+consecutive bars' sessions differ. The indicator draws these as thin
 vertical lines so a regime band or marker can be read directly against
 the session it fell in on the same chart -- purely an aid to reading the
 chart, changing nothing about how a regime is classified.
+
+SESSION-STAT SUMMARY (v4). session_stat_line renders each
+vo.telemetry.regime_report.SessionRegimeStats cell (the same
+build_session_breakdown computation the backtest report's "Session
+breakdown" table already renders as markdown) as one SSTAT line, so the
+chart can show the same numbers as a small on-chart panel instead of
+only in the .md report. This is an AGGREGATE over the whole run, not a
+point-in-time event -- it carries no epoch, is not chronologically
+interleaved with BAND/MARK/SESN, and the indicator draws it as a fixed
+corner-anchored text panel rather than a chart-time-anchored object.
+Gate G2 still holds: the panel is telemetry, never a decision-path
+input, exactly like the report table it mirrors. (v4 also moved
+drawing responsibility from the retired VO_Regime.mq5 into
+VO_ReferenceLevels.mq5, per the user's explicit consolidation request --
+a UI change only; this module's feed format and gates are unaffected.)
 """
 
 from __future__ import annotations
@@ -75,6 +93,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from vo.market.bar import Bar
 from vo.observation.regime import (
@@ -85,7 +104,17 @@ from vo.observation.regime import (
 )
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
 
-FEED_VERSION = 3
+if TYPE_CHECKING:
+    # Import-cycle guard: vo.telemetry.regime_report already imports
+    # RegimeSegment FROM this module, so a real (runtime) import the
+    # other way would be circular. SessionRegimeStats is only ever used
+    # here as a type hint (session_stat_line/render_feed_lines read its
+    # attributes, never isinstance-check it), so a TYPE_CHECKING-only
+    # import keeps mypy accurate with zero runtime dependency direction
+    # change.
+    from vo.telemetry.regime_report import SessionRegimeStats
+
+FEED_VERSION = 4
 FEED_DELIMITER = "|"
 _COMMENT_PREFIX = "#"
 
@@ -310,12 +339,14 @@ def build_session_boundaries(
 _BAND_TAG = "BAND"
 _MARK_TAG = "MARK"
 _SESN_TAG = "SESN"
+_SSTAT_TAG = "SSTAT"
 
 
 def feed_header(
     segments: Sequence[RegimeSegment],
     markers: Sequence[RegimeMarker] = (),
     boundaries: Sequence[SessionBoundary] = (),
+    session_stats: Sequence[SessionRegimeStats] = (),
     *,
     generated_utc: datetime,
 ) -> str:
@@ -330,7 +361,8 @@ def feed_header(
         f"{_COMMENT_PREFIX} VO_REGIME_FEED v{FEED_VERSION} "
         f"instrument={instrument} timeframe={timeframe} "
         f"generated_utc={generated_utc.isoformat()} "
-        f"segments={len(segments)} markers={len(markers)} boundaries={len(boundaries)}"
+        f"segments={len(segments)} markers={len(markers)} boundaries={len(boundaries)} "
+        f"session_stats={len(session_stats)}"
     )
 
 
@@ -409,24 +441,58 @@ def session_boundary_line(boundary: SessionBoundary, *, at_epoch: int) -> str:
     return FEED_DELIMITER.join(fields)
 
 
+def session_stat_line(stat: SessionRegimeStats) -> str:
+    """One pipe-delimited session-stat summary line: a "SSTAT" tag then
+    six fields (seven total) -- unlike BAND/MARK/SESN this is an
+    AGGREGATE over the whole run, not a point-in-time event, so it
+    carries no epoch and is not chronologically interleaved by
+    render_feed_lines; the indicator draws these as a fixed summary
+    panel rather than a chart-time-anchored object.
+
+    Fields: SSTAT | session | regime | bar_count | total_minutes |
+    share_of_session | segments_started. `regime` is UNCLASSIFIED when
+    the source SessionRegimeStats.regime is None (bars before the
+    engine's first RegimeState). No object_id: like a SessionBoundary,
+    this traces back to no single canonical record -- it is a summary
+    OVER many RegimeState records, not one of them (gate G8 still holds:
+    every band/marker feeding the summary already carries its own
+    object_id where it is drawn)."""
+    regime = stat.regime.name if stat.regime is not None else "UNCLASSIFIED"
+    fields = [
+        _SSTAT_TAG,
+        stat.session,
+        regime,
+        str(stat.bar_count),
+        repr(stat.total_minutes),
+        repr(stat.share_of_session),
+        str(stat.segments_started),
+    ]
+    return FEED_DELIMITER.join(fields)
+
+
 def render_feed_lines(
     segments: Sequence[RegimeSegment],
     markers: Sequence[RegimeMarker] = (),
     boundaries: Sequence[SessionBoundary] = (),
+    session_stats: Sequence[SessionRegimeStats] = (),
     *,
     epoch_of: Callable[[datetime], int],
     generated_utc: datetime,
 ) -> list[str]:
     """Full feed content: one provenance header, then one line per band,
     marker, or session boundary, in chronological order (interleaved by
-    their own time so the file reads sensibly top to bottom).
+    their own time so the file reads sensibly top to bottom), then the
+    session-stat summary lines (unordered by time -- they are aggregates,
+    not instants, so they are simply appended last, in the order given).
 
     `epoch_of` maps a resolved UTC instant to the broker-server epoch
     seconds MT5 draws in (the identity `int(dt.timestamp())` is fine for
     tests that don't care about broker offset). The open-ended final band
     emits end_epoch 0.
     """
-    lines = [feed_header(segments, markers, boundaries, generated_utc=generated_utc)]
+    lines = [
+        feed_header(segments, markers, boundaries, session_stats, generated_utc=generated_utc)
+    ]
 
     events: list[tuple[datetime, str]] = []
     for segment in segments:
@@ -444,4 +510,5 @@ def render_feed_lines(
     events.sort(key=lambda pair: pair[0])
 
     lines.extend(line for _when, line in events)
+    lines.extend(session_stat_line(stat) for stat in session_stats)
     return lines

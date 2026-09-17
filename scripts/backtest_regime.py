@@ -11,7 +11,7 @@ the only MetaTrader5 caller, gate G7), runs the SAME real RegimeEngine
 over it, and produces two things:
 
   1. the regime feed (<symbol>_regime.feed) covering the full history, so
-     VO_Regime.mq5 draws deep bands -- a static snapshot, not the live
+     VO_ReferenceLevels.mq5 draws deep bands -- a static snapshot, not the live
      --watch stream (stop --watch before running this, or they fight over
      the file);
   2. a markdown backtest report (regime_backtest_<symbol>.md) -- time in
@@ -195,17 +195,9 @@ def main() -> None:
     print("building regime segments/markers/session boundaries and the report...", flush=True)
     _t_build = time.monotonic()
 
-    # 1. Full-history feed for VO_Regime.mq5.
-    def epoch_of(instant: datetime) -> int:
-        return broker_epoch_by_utc[instant]
-
-    feed_lines = render_feed_lines(
-        segments, markers, boundaries, epoch_of=epoch_of, generated_utc=datetime.now(UTC)
-    )
-    feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
-    _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
-
-    # 2. Backtest report.
+    # 1. Backtest report -- built first so its per-session breakdown
+    # (report.per_session) can be reused as the feed's SSTAT lines below,
+    # instead of calling build_session_breakdown a second time.
     history_end = sequence.bars[-1].open_time_utc
     report = build_regime_report(
         segments,
@@ -219,6 +211,23 @@ def main() -> None:
     markdown = render_report_markdown(report)
     report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
     report_path.write_text(markdown, encoding="utf-8")
+
+    # 2. Full-history feed for VO_ReferenceLevels.mq5 (regime drawing moved
+    # there, v4) -- session_stats (SSTAT lines) reuse report.per_session so
+    # the chart's summary panel and the markdown report always agree.
+    def epoch_of(instant: datetime) -> int:
+        return broker_epoch_by_utc[instant]
+
+    feed_lines = render_feed_lines(
+        segments,
+        markers,
+        boundaries,
+        report.per_session,
+        epoch_of=epoch_of,
+        generated_utc=datetime.now(UTC),
+    )
+    feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
+    _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
     print(f"  -> feed/report built in {time.monotonic() - _t_build:.1f}s", flush=True)
 
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0

@@ -27,7 +27,9 @@ from vo.telemetry.regime_feed import (
     marker_line,
     render_feed_lines,
     session_boundary_line,
+    session_stat_line,
 )
+from vo.telemetry.regime_report import SessionRegimeStats
 from vo.time.sessions import SessionConfig, SessionWindow
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="Test-Server", broker_symbol="US100")
@@ -404,6 +406,96 @@ def test_session_boundary_line_format() -> None:
     line = session_boundary_line(boundary, at_epoch=99)
     fields = line.split(FEED_DELIMITER)
     assert fields == ["SESN", "99", "MORNING", "AFTERNOON"]
+
+
+def test_session_stat_line_format() -> None:
+    stat = SessionRegimeStats(
+        session="MORNING",
+        regime=RegimeType.EXPANSION,
+        bar_count=120,
+        total_minutes=120.0,
+        share_of_session=0.5,
+        segments_started=3,
+    )
+    line = session_stat_line(stat)
+    fields = line.split(FEED_DELIMITER)
+    assert fields == ["SSTAT", "MORNING", "EXPANSION", "120", "120.0", "0.5", "3"]
+
+
+def test_session_stat_line_encodes_unclassified_regime_as_none() -> None:
+    stat = SessionRegimeStats(
+        session="OFF_SESSION",
+        regime=None,
+        bar_count=5,
+        total_minutes=5.0,
+        share_of_session=1.0,
+        segments_started=0,
+    )
+    fields = session_stat_line(stat).split(FEED_DELIMITER)
+    assert fields[2] == "UNCLASSIFIED"
+
+
+def test_feed_header_reports_session_stats_count() -> None:
+    states, bars = _scenario()
+    segments = build_regime_segments(states, bars)
+    stats = (
+        SessionRegimeStats(
+            session="MORNING",
+            regime=RegimeType.CONSOLIDATION,
+            bar_count=10,
+            total_minutes=10.0,
+            share_of_session=1.0,
+            segments_started=1,
+        ),
+    )
+
+    lines = render_feed_lines(
+        segments,
+        session_stats=stats,
+        epoch_of=lambda dt: int(dt.timestamp()),
+        generated_utc=datetime(2026, 1, 1, 0, 6, tzinfo=UTC),
+    )
+    assert "session_stats=1" in lines[0]
+
+
+def test_render_feed_lines_appends_session_stats_after_chronological_events() -> None:
+    states, bars = _scenario()
+    segments = build_regime_segments(states, bars)
+    markers = build_regime_markers(states, bars)
+    boundaries = build_session_boundaries(bars, _session_config())
+    stats = (
+        SessionRegimeStats(
+            session="MORNING",
+            regime=RegimeType.CONSOLIDATION,
+            bar_count=10,
+            total_minutes=10.0,
+            share_of_session=1.0,
+            segments_started=1,
+        ),
+        SessionRegimeStats(
+            session="AFTERNOON",
+            regime=RegimeType.EXPANSION,
+            bar_count=20,
+            total_minutes=20.0,
+            share_of_session=1.0,
+            segments_started=2,
+        ),
+    )
+
+    lines = render_feed_lines(
+        segments,
+        markers,
+        boundaries,
+        stats,
+        epoch_of=lambda dt: int(dt.timestamp()),
+        generated_utc=datetime(2026, 1, 1, 0, 6, tzinfo=UTC),
+    )
+    total_events = len(segments) + len(markers) + len(boundaries)
+    tail = lines[1 + total_events :]
+    assert len(tail) == len(stats)
+    assert [line.split(FEED_DELIMITER)[0] for line in tail] == ["SSTAT", "SSTAT"]
+    assert tail[0].split(FEED_DELIMITER)[1] == "MORNING"
+    assert tail[1].split(FEED_DELIMITER)[1] == "AFTERNOON"
 
 
 def test_render_feed_lines_interleaves_all_three_event_types() -> None:
