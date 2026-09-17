@@ -2,7 +2,12 @@
 """
 Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
-    python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N]
+    python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] [--validate]
+
+--validate additionally builds a Regime Engine Validation Report v1
+(vo.telemetry.regime_validation) from the SAME in-memory replay -- no
+second MT5 pull, no second engine run -- and writes
+regime_validation_<symbol>.md alongside the plain backtest report.
 
 The live publisher (scripts/publish_regime.py) only ever sees the ~500
 bars VO_Bridge backfills -- a short runway. This pulls a MUCH longer M1
@@ -51,7 +56,19 @@ from vo.telemetry.regime_feed import (  # noqa: E402
     build_session_boundaries,
     render_feed_lines,
 )
-from vo.telemetry.regime_report import build_regime_report, render_report_markdown  # noqa: E402
+from vo.telemetry.regime_report import (  # noqa: E402
+    build_regime_report,
+    durations_by_regime,
+    render_report_markdown,
+)
+from vo.telemetry.regime_validation import (  # noqa: E402
+    build_accuracy_validation,
+    build_duration_distributions,
+    build_evidence_comparison,
+    build_period_breakdown,
+    build_transition_matrix,
+    render_validation_report_markdown,
+)
 from vo.time.brokers import load_broker_profiles, resolve_broker_utc  # noqa: E402
 from vo.time.sessions import load_session_configs  # noqa: E402
 
@@ -67,21 +84,25 @@ REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int]:
+def _parse_args(argv: list[str]) -> tuple[str, int, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
+    validate = False
     rest = []
     i = 0
     while i < len(argv):
         if argv[i] == "--bars" and i + 1 < len(argv):
             bars = int(argv[i + 1])
             i += 2
+        elif argv[i] == "--validate":
+            validate = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
     if rest:
         config_path = rest[0]
-    return config_path, bars
+    return config_path, bars, validate
 
 
 def _write_feed_atomic(out_path: Path, text: str) -> None:
@@ -99,7 +120,7 @@ def _write_feed_atomic(out_path: Path, text: str) -> None:
 
 
 def main() -> None:
-    config_path, bar_cap = _parse_args(sys.argv[1:])
+    config_path, bar_cap, validate = _parse_args(sys.argv[1:])
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
@@ -230,6 +251,33 @@ def main() -> None:
     _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
     print(f"  -> feed/report built in {time.monotonic() - _t_build:.1f}s", flush=True)
 
+    validation_report_path: Path | None = None
+    if validate:
+        print("building Regime Engine Validation Report v1...", flush=True)
+        _t_validate = time.monotonic()
+        periods = build_period_breakdown(segments, states, transitions_log, sequence.bars)
+        transition_matrix = build_transition_matrix(transitions_log)
+        durations = build_duration_distributions(
+            durations_by_regime(segments, bars=sequence.bars)
+        )
+        evidence = build_evidence_comparison(states)
+        accuracy = build_accuracy_validation(states, session_config=session_config)
+        validation_markdown = render_validation_report_markdown(
+            instrument_key=config.broker_symbol,
+            timeframe_canonical="M1",
+            generated_utc=datetime.now(UTC),
+            periods=periods,
+            transition_matrix=transition_matrix,
+            durations=durations,
+            evidence=evidence,
+            accuracy=accuracy,
+        )
+        validation_report_path = REPO_ROOT / f"regime_validation_{config.broker_symbol}.md"
+        validation_report_path.write_text(validation_markdown, encoding="utf-8")
+        print(
+            f"  -> validation report built in {time.monotonic() - _t_validate:.1f}s", flush=True
+        )
+
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
     coverage_pct = (trading_days / calendar_days * 100.0) if calendar_days > 0 else 100.0
@@ -248,6 +296,8 @@ def main() -> None:
         print(f"session lines:    {len(boundaries)} (session-boundary vertical lines)")
     print(f"feed written:     {feed_path}")
     print(f"report written:   {report_path}")
+    if validation_report_path is not None:
+        print(f"validation report written: {validation_report_path}")
     print()
     print(markdown)
 
