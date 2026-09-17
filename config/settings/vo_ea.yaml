@@ -11,7 +11,7 @@ version: 1
 instrument:
   # Must match VO_Bridge.mq5's own _Symbol on the chart it is attached to
   # -- config/settings/sessions.yaml is keyed by this same broker_symbol.
-  broker_symbol: "US100.n"
+  broker_symbol: "US100"
 
 wire:
   # The terminal's MQL5\Files\<InpOutputSubdir>\ folder (VO_Transport.mqh

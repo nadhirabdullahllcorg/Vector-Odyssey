@@ -9,10 +9,28 @@
 # correction: settlement is 16:14 ET, not the doc's illustrative 16:15
 # (confirmed directly against the actual settlement/close convention -
 # Phase 7).
-version: 1
+#
+# US100 (no .n suffix) is the SAME Nasdaq instrument as it is named on
+# the live 1xTrade-Server account verified in Phase 12 (login 130695);
+# the .n variant was the earlier golden-capture name. Same session model,
+# so the entry is mirrored rather than re-derived. Both are kept: US100.n
+# for the historical fixtures, US100 for the live account VO_EA targets.
+version: 2
 
 instruments:
   US100.n:
+    timezone: America/New_York
+    trading_day_opens: "18:00"        # previous calendar day
+    sessions:
+      ASIA:      { start: "18:00", end: "03:00" }
+      LONDON:    { start: "03:00", end: "09:30" }
+      NY_AM:     { start: "09:30", end: "12:00" }
+      NY_PM:     { start: "12:00", end: "16:00" }
+    rth:         { start: "09:30", end: "16:00" }
+    settlement:  "16:14"
+
+  # Same Nasdaq session model as US100.n -- the live 1xTrade-Server name.
+  US100:
     timezone: America/New_York
     trading_day_opens: "18:00"        # previous calendar day
     sessions:
