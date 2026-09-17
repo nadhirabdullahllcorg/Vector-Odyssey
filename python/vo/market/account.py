@@ -135,3 +135,23 @@ class Order:
     comment: str
     setup_at_broker_epoch_s: int
     """Broker-server epoch seconds, NOT UTC -- see the module docstring."""
+
+
+@dataclass(frozen=True)
+class Rate:
+    """One OHLCV bar as MT5's copy_rates returns it. `time` is broker-SERVER
+    epoch seconds, not true UTC -- the same convention as the position/order
+    timestamps above and schema v2 -- so it is kept raw as
+    `time_broker_epoch_s`, never silently relabelled UTC. Turning it into a
+    canonical Bar (broker -> UTC) needs the Time Engine + a broker profile,
+    done by the consumer (scripts/backtest_regime.py), exactly as the live
+    wire path resolves VO_Bridge's server-time bars."""
+
+    time_broker_epoch_s: int
+    open: float
+    high: float
+    low: float
+    close: float
+    tick_volume: int
+    spread: int
+    real_volume: int

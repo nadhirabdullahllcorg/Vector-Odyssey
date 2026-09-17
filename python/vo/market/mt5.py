@@ -48,6 +48,7 @@ from vo.market.account import (
     OrderState,
     Position,
     PositionSide,
+    Rate,
 )
 from vo.market.identity import InstrumentId
 from vo.market.symbol import Symbol
@@ -185,6 +186,23 @@ def map_symbol(raw: Any, *, broker_server: str) -> Symbol:
     )
 
 
+def map_rate(raw: Any) -> Rate:
+    """Map one MT5 rate row to a Rate. MT5's copy_rates returns a numpy
+    structured array whose rows are accessed by field name (item access),
+    so this uses raw["open"] rather than raw.open -- and is tested with a
+    plain dict, which supports the same access."""
+    return Rate(
+        time_broker_epoch_s=int(raw["time"]),
+        open=float(raw["open"]),
+        high=float(raw["high"]),
+        low=float(raw["low"]),
+        close=float(raw["close"]),
+        tick_volume=int(raw["tick_volume"]),
+        spread=int(raw["spread"]),
+        real_volume=int(raw["real_volume"]),
+    )
+
+
 # ── the terminal-facing client (the only real-package caller) ───────────────
 
 
@@ -196,6 +214,7 @@ class TerminalReadApi(Protocol):
     def symbol(self, broker_symbol: str) -> Symbol: ...
     def positions(self) -> tuple[Position, ...]: ...
     def orders(self) -> tuple[Order, ...]: ...
+    def copy_rates(self, broker_symbol: str, count: int) -> tuple[Rate, ...]: ...
 
 
 def _mt5() -> Any:
@@ -285,3 +304,20 @@ class MT5ReadClient:
             needle = contains.lower()
             names = tuple(n for n in names if needle in n.lower())
         return names
+
+    def copy_rates(self, broker_symbol: str, count: int) -> tuple[Rate, ...]:  # pragma: no cover
+        """The most recent `count` M1 bars for `broker_symbol`, straight from
+        the terminal's history (copy_rates_from_pos, position 0). Raw Rates
+        (broker-server epoch time); the caller resolves them to canonical
+        Bars via a broker profile. The terminal returns however much M1
+        history it has downloaded -- ask for more than exists and you simply
+        get what exists."""
+        self._require_server()
+        mt5 = _mt5()
+        rates = mt5.copy_rates_from_pos(broker_symbol, mt5.TIMEFRAME_M1, 0, count)
+        if rates is None or len(rates) == 0:
+            raise MT5Error(
+                f"copy_rates_from_pos({broker_symbol!r}, M1, 0, {count}) returned "
+                f"no data: {mt5.last_error()}"
+            )
+        return tuple(map_rate(r) for r in rates)

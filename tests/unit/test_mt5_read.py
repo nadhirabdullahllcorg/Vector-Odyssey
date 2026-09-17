@@ -18,7 +18,7 @@ import pytest
 
 from vo.market.account import OrderKind, OrderState, PositionSide
 from vo.market.identity import InstrumentId
-from vo.market.mt5 import map_account, map_order, map_position, map_symbol
+from vo.market.mt5 import map_account, map_order, map_position, map_rate, map_symbol
 
 _SERVER = "1xTrade-Server"
 
@@ -171,3 +171,28 @@ def test_map_symbol_matches_the_canonical_symbol_shape():
     assert sym.instrument_id == InstrumentId(
         platform="MT5", broker_server=_SERVER, broker_symbol="US100.n"
     )
+
+
+def test_map_rate_reads_ohlcv_and_keeps_server_epoch_time():
+    """MT5 copy_rates rows are numpy structured-array rows (item access), so
+    map_rate uses raw["open"] and is tested with a dict. `time` is broker
+    server epoch seconds and is kept raw, never relabelled UTC."""
+    row = {
+        "time": 1_789_600_000,
+        "open": 29130.5,
+        "high": 29140.0,
+        "low": 29125.25,
+        "close": 29138.75,
+        "tick_volume": 231,
+        "spread": 70,
+        "real_volume": 0,
+    }
+    rate = map_rate(row)
+    assert rate.time_broker_epoch_s == 1_789_600_000
+    assert rate.open == 29130.5
+    assert rate.high == 29140.0
+    assert rate.low == 29125.25
+    assert rate.close == 29138.75
+    assert rate.tick_volume == 231
+    assert rate.spread == 70
+    assert rate.real_volume == 0
