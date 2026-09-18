@@ -35,6 +35,17 @@ mt5 = [
     "MetaTrader5>=5.0; platform_system == 'Windows'",
 ]
 
+# Only needed to run vo.research.hmm_report (Phase 17a's IHMMEngine,
+# architecture/vo-trade-logic-and-brain-plan.md Sec 5.7-revision,
+# 2026-09-18) -- an [VO-H] research/validation aside, not a dependency of
+# the core EA/VO pipeline. Kept optional for the same reason as [dashboard]
+# and [mt5]: the core/test environment never needs it, and
+# vo.research.hmm_report imports it lazily (see that module's _hmmlearn()).
+# Cross-platform (unlike MetaTrader5) -- no platform_system marker needed.
+hmm = [
+    "hmmlearn>=0.3",
+]
+
 [tool.setuptools.packages.find]
 where = ["python"]
 
@@ -60,4 +71,11 @@ strict = true
 # core/CI env where it is not installed and ships no stubs.
 [[tool.mypy.overrides]]
 module = "MetaTrader5"
+ignore_missing_imports = true
+
+# hmmlearn is an optional, untyped dependency (vo.research.hmm_report's
+# [hmm] extra, imported lazily -- see that module's docstring). mypy runs
+# in the core/CI env where it is not installed and ships no stubs.
+[[tool.mypy.overrides]]
+module = "hmmlearn.*"
 ignore_missing_imports = true
