@@ -104,7 +104,7 @@ class DataQuality(Enum):
     QUARANTINED = auto()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Bar:
     """
     Canonical representation of a single market bar.
