@@ -721,13 +721,10 @@ void VO_DeleteExpiredObjects(const datetime cutoff)
 
 void VO_DeleteAllObjects()
   {
-   const string prefix = VO_REF_PREFIX + "|";
-   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
-     {
-      const string name = ObjectName(0, i);
-      if(StringFind(name, prefix) == 0)
-         ObjectDelete(0, name);
-     }
+   // Prefix-filtered bulk delete, one terminal call (2026-09-18, finding C1).
+   // VO_DeleteExpiredObjects above still walks, because it must parse each
+   // name's date token -- it runs at day rollover only, not per refresh.
+   ObjectsDeleteAll(0, VO_REF_PREFIX + "|", -1, -1);
   }
 
 //+------------------------------------------------------------------+
@@ -795,27 +792,35 @@ string VO_FeedPath()
 void VO_ReadAndDraw()
   {
    const string path = VO_FeedPath();
-   // FILE_SHARE_WRITE so a concurrent publish_regime --watch write does
-   // not lock us out; the publisher writes atomically (tmp + rename) so
-   // we never see a half-written feed anyway.
    const int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI |
                                FILE_SHARE_READ | FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
       return; // feed not published yet -- leave whatever is on the chart
 
-   VO_DeleteAllSessionLineObjects();
-
-   int drawn = 0;
+   // Read everything, then CLOSE, then touch chart objects (2026-09-18
+   // audit, finding C1 -- see VO_Regime.mq5's VO_ReadAndDraw for why).
+   string lines[];
+   int line_count = 0;
    while(!FileIsEnding(handle))
      {
       const string line = FileReadString(handle);
       if(StringLen(line) == 0)
          continue;
       if(StringGetCharacter(line, 0) == '#')
-         continue; // provenance comment
+         continue; // provenance comment(s)
+      ArrayResize(lines, line_count + 1);
+      lines[line_count] = line;
+      line_count++;
+     }
+   FileClose(handle);
 
+   VO_DeleteAllSessionLineObjects();
+
+   int drawn = 0;
+   for(int li = 0; li < line_count; li++)
+     {
       string f[];
-      const int n = StringSplit(line, '|', f);
+      const int n = StringSplit(lines[li], '|', f);
       if(n < 1)
          continue; // empty/malformed line -- skip defensively
 
@@ -829,8 +834,6 @@ void VO_ReadAndDraw()
       // "the bug is in the Python engine or the feed, never here"
       // discipline as everywhere else in this file.
      }
-
-   FileClose(handle);
   }
 
 //+------------------------------------------------------------------+
@@ -896,12 +899,7 @@ void VO_DrawSessionBoundary(const string &f[], const int ordinal)
 //+------------------------------------------------------------------+
 void VO_DeleteAllSessionLineObjects()
   {
-   const string prefix = VO_SESN_PREFIX + "|";
-   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
-     {
-      const string name = ObjectName(0, i);
-      if(StringFind(name, prefix) == 0)
-         ObjectDelete(0, name);
-     }
+   // Prefix-filtered bulk delete, one terminal call (finding C1).
+   ObjectsDeleteAll(0, VO_SESN_PREFIX + "|", -1, -1);
   }
 //+------------------------------------------------------------------+

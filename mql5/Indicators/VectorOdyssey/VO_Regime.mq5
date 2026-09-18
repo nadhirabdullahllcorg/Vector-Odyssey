@@ -139,6 +139,10 @@
 //    object shapes this file draws haven't changed, only which .mq5 file
 //    draws them, so there is nothing to orphan by bumping the version.
 #define VO_RGM_PREFIX "VO_RGM_v3"
+// Build tag: shown in the indicator shortname and the on-chart status line
+// so a screenshot can prove WHICH compiled build is on the chart (a stale
+// .ex5 looks identical otherwise). Bump on every behavior change.
+#define VO_RGM_BUILD  "b37"
 #define VO_TAG_BAND "BAND"
 #define VO_TAG_MARK "MARK"
 #define VO_TAG_SSTAT "SSTAT"
@@ -149,6 +153,7 @@
 input group "=== Feed source (MQL5\\Files\\<subdir>\\<symbol>_regime.feed) ==="
 input string InpFeedSubdir     = "VectorOdyssey"; // must match VO_Bridge InpOutputSubdir / vo_ea.yaml wire.dir
 input string InpSymbolOverride = "";              // blank = this chart's symbol; else e.g. "US100"
+input string InpFeedName       = "";              // blank = <symbol>_regime.feed (live, publish_regime --watch); "<symbol>_regime_history.feed" = backtest_regime.py's deep history
 
 input group "=== Refresh ==="
 input int    InpRefreshSeconds = 5;   // re-read the feed on this timer (publish_regime --watch interval)
@@ -188,7 +193,7 @@ datetime g_last_seen_bar_open = 0;
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   IndicatorSetString(INDICATOR_SHORTNAME, "VO Regime");
+   IndicatorSetString(INDICATOR_SHORTNAME, "VO Regime " + VO_RGM_BUILD);
    if(InpRefreshSeconds > 0)
       EventSetTimer(InpRefreshSeconds);
    VO_ReadAndDraw();
@@ -234,7 +239,8 @@ int OnCalculate(const int rates_total, const int prev_calculated, const datetime
 string VO_FeedPath()
   {
    const string sym = (StringLen(InpSymbolOverride) > 0) ? InpSymbolOverride : _Symbol;
-   return StringFormat("%s\\%s_regime.feed", InpFeedSubdir, sym);
+   const string file = (StringLen(InpFeedName) > 0) ? InpFeedName : (sym + "_regime.feed");
+   return StringFormat("%s\\%s", InpFeedSubdir, file);
   }
 
 //+------------------------------------------------------------------+
@@ -260,16 +266,69 @@ color VO_RegimeColor(const string regime)
 //| feed but deliberately ignored here -- VO_ReferenceLevels.mq5's     |
 //| own job (see this file's header note).                            |
 //+------------------------------------------------------------------+
+string g_last_feed_header = "";  // Experts-log diagnostics print once per new feed header
+
+//+------------------------------------------------------------------+
+//| On-chart status line (top-left): build tag, feed path, what was    |
+//| drawn (or why nothing was). Silence is never ambiguous again.      |
+//+------------------------------------------------------------------+
+void VO_DrawStatus(const string text)
+  {
+   const string name = VO_RGM_PREFIX + "|status";
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 8);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 4);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+     }
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpLabelColor);
+  }
+
+//+------------------------------------------------------------------+
+//| Read the whole feed into memory and CLOSE IT before touching a     |
+//| single chart object (2026-09-18 audit, finding C1: holding the     |
+//| handle open across an ObjectsTotal walk of a chart full of swing   |
+//| boxes kept the file locked for seconds per refresh, which is what  |
+//| starved publish_regime --watch's rename into WinError 5).          |
+//+------------------------------------------------------------------+
 void VO_ReadAndDraw()
   {
    const string path = VO_FeedPath();
-   // FILE_SHARE_WRITE so a concurrent publish_regime --watch write does
-   // not lock us out; the publisher writes atomically (tmp + rename) so
-   // we never see a half-written feed anyway.
    const int handle = FileOpen(path, FILE_READ | FILE_TXT | FILE_ANSI |
                                FILE_SHARE_READ | FILE_SHARE_WRITE);
    if(handle == INVALID_HANDLE)
-      return; // feed not published yet -- leave whatever is on the chart
+     {
+      // Feed not published yet -- say so on the chart instead of drawing nothing silently.
+      VO_DrawStatus(StringFormat("VO Regime %s | no feed at MQL5\\Files\\%s (run publish_regime.py or backtest_regime.py)",
+                                 VO_RGM_BUILD, path));
+      return;
+     }
+
+   string lines[];
+   int line_count = 0;
+   string header = "";
+   while(!FileIsEnding(handle))
+     {
+      const string line = FileReadString(handle);
+      if(StringLen(line) == 0)
+         continue;
+      if(StringGetCharacter(line, 0) == '#')
+        {
+         if(StringLen(header) == 0)
+            header = line;
+         continue; // provenance comment(s)
+        }
+      ArrayResize(lines, line_count + 1);
+      lines[line_count] = line;
+      line_count++;
+     }
+   FileClose(handle);   // <-- closed BEFORE any chart-object work
 
    // The live edge a still-current (end_epoch 0) band is extended to.
    const datetime live_edge = iTime(_Symbol, PERIOD_CURRENT, 0);
@@ -277,31 +336,40 @@ void VO_ReadAndDraw()
    VO_DeleteAllRegimeObjects();
 
    int drawn = 0;
+   int bands = 0;
+   int marks = 0;
    string sstat_rows[];
    int sstat_count = 0;
+   bool printed_sample = (header == g_last_feed_header);
 
-   while(!FileIsEnding(handle))
+   for(int li = 0; li < line_count; li++)
      {
-      const string line = FileReadString(handle);
-      if(StringLen(line) == 0)
-         continue;
-      if(StringGetCharacter(line, 0) == '#')
-         continue; // provenance comment
-
       string f[];
-      const int n = StringSplit(line, '|', f);
+      const int n = StringSplit(lines[li], '|', f);
       if(n < 1)
          continue; // empty/malformed line -- skip defensively
 
       if(f[0] == VO_TAG_BAND && n == VO_FEED_BAND_FIELDS)
         {
+         if(!printed_sample)
+           {
+            // One Experts-log line per new feed: the parsed fields and the color
+            // the regime name resolved to -- a screenshot plus this line settles
+            // "what did the indicator actually draw" without guessing.
+            PrintFormat("VO Regime %s: first band regime=%s dir=%s start=%s end=%s high=%s low=%s color=%s (fill=%s)",
+                        VO_RGM_BUILD, f[2], f[3], f[4], f[5], f[6], f[7],
+                        ColorToString(VO_RegimeColor(f[2]), true), InpFillBands ? "true" : "false");
+            printed_sample = true;
+           }
          VO_DrawBand(f, live_edge, drawn);
          drawn++;
+         bands++;
         }
       else if(f[0] == VO_TAG_MARK && n == VO_FEED_MARKER_FIELDS)
         {
          VO_DrawMarker(f, drawn);
          drawn++;
+         marks++;
         }
       else if(f[0] == VO_TAG_SSTAT && n == VO_FEED_SESSION_STAT_FIELDS && InpShowSessionStats)
         {
@@ -314,11 +382,14 @@ void VO_ReadAndDraw()
       // Python engine or the feed, never here" discipline as everywhere
       // else in this file.
      }
-
-   FileClose(handle);
+   g_last_feed_header = header;
 
    if(InpShowSessionStats)
       VO_DrawSessionStatsPanel(sstat_rows, sstat_count);
+
+   VO_DrawStatus(StringFormat("VO Regime %s | %s | %d bands, %d markers | %s",
+                              VO_RGM_BUILD, path, bands, marks,
+                              (StringLen(header) > 0) ? header : "(no header line)"));
   }
 
 //+------------------------------------------------------------------+
@@ -543,12 +614,9 @@ void VO_DrawCornerLabel(const string name, const string text, const color clr, c
 //+------------------------------------------------------------------+
 void VO_DeleteAllRegimeObjects()
   {
-   const string prefix = VO_RGM_PREFIX + "|";
-   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
-     {
-      const string name = ObjectName(0, i);
-      if(StringFind(name, prefix) == 0)
-         ObjectDelete(0, name);
-     }
+   // One terminal call, prefix-filtered -- never a per-object walk of the
+   // whole chart (which scales with every VO_Swings box and reference-level
+   // ray on it, not with this indicator's own objects). Finding C1.
+   ObjectsDeleteAll(0, VO_RGM_PREFIX + "|", -1, -1);
   }
 //+------------------------------------------------------------------+

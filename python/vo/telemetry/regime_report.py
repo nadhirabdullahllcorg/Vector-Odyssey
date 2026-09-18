@@ -41,13 +41,27 @@ times `minutes_per_bar` -- never a timestamp subtraction. Without
 with no real bar data), the old wall-clock subtraction remains as an
 explicit fallback -- approximate, and it will overcount a segment that
 happens to span a gap.
+
+LEAN SCORING (2026-09-18 audit, finding A2). A pullback's lean is refreshed
+whenever it changes (RegimeEngine._maybe_refresh_lean), and the lean is a
+function of pullback depth -- the same geometry that DEFINES the outcome
+(REVERSAL = close beyond the defining swing, depth > 1; RETRACEMENT = new
+extreme, depth back to 0). Scoring the lean one supersedes-hop back from
+the resolution therefore scores it at an outcome-adjacent instant: near-
+tautological for 1-2 bar pullbacks, anti-correlated for long ones, and
+the blend of the two is not an "accuracy". build_lean_chains /
+score_lean_chains are the single implementation both this module and
+vo.telemetry.regime_validation use: the lean is scored at the ORIGIN
+record (a fixed information point) and, in the validation report, at
+fixed k-bar horizons on the pullbacks that survived past bar k; the
+last-refresh number is retained only as a labelled diagnostic.
 """
 
 from __future__ import annotations
 
 import statistics
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -88,6 +102,12 @@ class RegimeStats:
     mean_efficiency_ratio: float | None
     mean_hurst: float | None
     is_momentary: bool = False
+    state_records: int = 0
+    """Every RegimeState record carrying this regime, INCLUDING lean-refresh
+    records (a PULLBACK_UNRESOLVED re-emitted because its lean changed).
+    Unit-of-analysis note (2026-09-18 audit): mean ER/Hurst above are taken
+    over segment-ENTRY records only (refreshes excluded), so a long pullback
+    that refreshed its lean forty times weighs the same as a two-bar one."""
 
 
 @dataclass(frozen=True)
@@ -120,10 +140,25 @@ class SessionRegimeStats:
 @dataclass(frozen=True)
 class AnticipationAccuracy:
     """How the [VO-H] lean on PULLBACK_UNRESOLVED fared against the actual
-    resolution. `leaned` counts resolutions whose superseded pullback
-    carried a directional lean (RETRACEMENT/REVERSAL, not UNCLEAR/none);
-    `matched` counts those the outcome agreed with. `rate` is
-    matched/leaned, or None when nothing leaned (no denominator to divide)."""
+    resolution, scored at TWO information points (see the module
+    docstring's LEAN SCORING section, added after the 2026-09-18 audit):
+
+    - `leaned`/`matched`/`rate`: the lean in effect at the LAST refresh
+      before resolution (one supersedes-hop back from the resolution
+      record). Outcome-adjacent: the lean is a function of pullback depth
+      and the outcome is defined on the same depth, so this number is
+      near-tautological for short pullbacks. Kept as a diagnostic, and
+      labelled as such wherever it is rendered -- never as "accuracy".
+    - `origin_leaned`/`origin_matched`/`origin_rate`: the lean recorded on
+      the FIRST PULLBACK_UNRESOLVED record of the chain, i.e. what the
+      engine believed the moment the pullback began, before any of the
+      pullback's own bars could inform it. This is the honest fixed-
+      information-point score.
+
+    `leaned` counts resolutions whose chain carried a directional lean
+    (RETRACEMENT/REVERSAL, not UNCLEAR/none) at that point; `matched`
+    counts those the outcome agreed with; `rate` is matched/leaned, or
+    None when nothing leaned (no denominator to divide)."""
 
     resolutions: int  # total RETRACEMENT + REVERSAL resolutions
     to_retracement: int
@@ -131,6 +166,9 @@ class AnticipationAccuracy:
     leaned: int
     matched: int
     rate: float | None
+    origin_leaned: int = 0
+    origin_matched: int = 0
+    origin_rate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +194,171 @@ def _feature_value(state: RegimeState, name: str) -> float | None:
 
 def _mean_or_none(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
+
+
+# ── lean chains: the ONE place a lean is matched to its outcome ───────────
+
+
+@dataclass(frozen=True)
+class LeanChain:
+    """One pullback, origin to resolution: its PULLBACK_UNRESOLVED records
+    in time order (origin first; each later one a lean refresh that
+    supersedes the previous -- see RegimeEngine._maybe_refresh_lean) and
+    the RETRACEMENT/REVERSAL record that resolved it. Every lean-accuracy
+    figure in this module and in vo.telemetry.regime_validation is scored
+    from these chains, so the two reports cannot score a lean differently."""
+
+    records: tuple[RegimeState, ...]
+    resolution: RegimeState
+
+    @property
+    def origin(self) -> RegimeState:
+        return self.records[0]
+
+    @property
+    def last(self) -> RegimeState:
+        return self.records[-1]
+
+
+@dataclass(frozen=True)
+class HorizonScore:
+    """The lean scored at one information point. `eligible` is how many
+    chains were still unresolved at that point (for a k-bar horizon, only
+    pullbacks that lasted more than k bars -- stated, not hidden: a
+    horizon-k score is a score on the survivors). `majority_baseline_rate`
+    is what always guessing the majority outcome scores on exactly those
+    eligible chains, so each horizon carries its own honest baseline."""
+
+    label: str
+    eligible: int
+    leaned: int
+    matched: int
+    rate: float | None
+    majority_baseline_rate: float | None
+
+
+def is_lean_refresh(state: RegimeState, by_id: Mapping[str, RegimeState]) -> bool:
+    """True for a PULLBACK_UNRESOLVED record that merely re-recorded the
+    lean of a still-open pullback (supersedes another PULLBACK_UNRESOLVED
+    record); False for the record where a pullback began."""
+    if state.regime is not RegimeType.PULLBACK_UNRESOLVED or state.supersedes is None:
+        return False
+    prior = by_id.get(state.supersedes)
+    return prior is not None and prior.regime is RegimeType.PULLBACK_UNRESOLVED
+
+
+def build_lean_chains(states: Sequence[RegimeState]) -> tuple[LeanChain, ...]:
+    """Walk every RETRACEMENT/REVERSAL record back through its supersedes
+    chain to the record where the pullback began. Resolutions whose chain
+    is empty (no PULLBACK_UNRESOLVED behind them) are skipped -- there is
+    no lean to score."""
+    by_id = {s.object_id: s for s in states}
+    chains: list[LeanChain] = []
+    for state in states:
+        if state.regime not in (RegimeType.RETRACEMENT, RegimeType.REVERSAL):
+            continue
+        if state.supersedes is None:
+            continue
+        cur = by_id.get(state.supersedes)
+        chain: list[RegimeState] = []
+        while cur is not None and cur.regime is RegimeType.PULLBACK_UNRESOLVED:
+            chain.append(cur)
+            cur = by_id.get(cur.supersedes) if cur.supersedes else None
+        if not chain:
+            continue
+        chain.reverse()
+        chains.append(LeanChain(records=tuple(chain), resolution=state))
+    return tuple(chains)
+
+
+def _lean_matches(lean: AnticipatedResolution | None, resolution: RegimeType) -> bool:
+    return (lean is AnticipatedResolution.RETRACEMENT and resolution is RegimeType.RETRACEMENT) or (
+        lean is AnticipatedResolution.REVERSAL and resolution is RegimeType.REVERSAL
+    )
+
+
+def _is_directional(lean: AnticipatedResolution | None) -> bool:
+    return lean in (AnticipatedResolution.RETRACEMENT, AnticipatedResolution.REVERSAL)
+
+
+def bar_offset(
+    record: RegimeState,
+    origin: RegimeState,
+    bar_index: Mapping[datetime, int],
+    minutes_per_bar: float,
+) -> int:
+    """Bars from `origin` to `record`. Exact (bar-counted, closures do not
+    count) when both instants are known bar open times; otherwise the
+    wall-clock fallback in units of minutes_per_bar, same fallback
+    discipline as durations_by_regime."""
+    a = bar_index.get(origin.observed_at)
+    b = bar_index.get(record.observed_at)
+    if a is not None and b is not None:
+        return b - a
+    return round((record.observed_at - origin.observed_at).total_seconds() / 60.0 / minutes_per_bar)
+
+
+def score_lean_chains(
+    chains: Sequence[LeanChain],
+    *,
+    horizon_bars: int | None,
+    bar_index: Mapping[datetime, int] | None = None,
+    minutes_per_bar: float = 1.0,
+) -> HorizonScore:
+    """Score the lean at one information point.
+
+    horizon_bars=None  -> the lean at the LAST refresh before resolution
+                          (outcome-adjacent diagnostic; every chain eligible).
+    horizon_bars=0     -> the ORIGIN lean (every chain eligible).
+    horizon_bars=k>0   -> the lean in effect k bars after origin, scored only
+                          on chains that were still unresolved after bar k
+                          (the survivors), so the score cannot borrow from
+                          the outcome.
+    """
+    index = bar_index or {}
+    eligible = 0
+    leaned = 0
+    matched = 0
+    outcomes: Counter[RegimeType] = Counter()
+    for chain in chains:
+        if horizon_bars is None:
+            record: RegimeState | None = chain.last
+        elif horizon_bars == 0:
+            record = chain.origin
+        else:
+            if bar_offset(chain.resolution, chain.origin, index, minutes_per_bar) <= horizon_bars:
+                continue  # resolved at or before the horizon -- not a forecast
+            record = None
+            for candidate in chain.records:
+                if bar_offset(candidate, chain.origin, index, minutes_per_bar) <= horizon_bars:
+                    record = candidate
+                else:
+                    break
+        if record is None:
+            continue
+        eligible += 1
+        outcomes[chain.resolution.regime] += 1
+        lean = record.anticipated_resolution
+        if not _is_directional(lean):
+            continue
+        leaned += 1
+        if _lean_matches(lean, chain.resolution.regime):
+            matched += 1
+    if horizon_bars is None:
+        label = "last refresh before resolution (outcome-adjacent diagnostic)"
+    elif horizon_bars == 0:
+        label = "origin (lean recorded when the pullback began)"
+    else:
+        label = f"+{horizon_bars} bars after origin (survivors only)"
+    return HorizonScore(
+        label=label,
+        eligible=eligible,
+        leaned=leaned,
+        matched=matched,
+        rate=(matched / leaned) if leaned else None,
+        majority_baseline_rate=(max(outcomes.values()) / eligible) if eligible else None,
+    )
+
 
 
 def build_session_breakdown(
@@ -335,9 +538,18 @@ def build_regime_report(
     grand_total = sum(sum(v) for v in durations.values()) or 1.0
 
     # ER / Hurst evidence per regime, from the state log.
+    # ER / Hurst evidence per regime, from the state log -- over segment-
+    # ENTRY records only. A lean refresh re-emits a PULLBACK_UNRESOLVED
+    # record with the same regime; counting those would weight the
+    # PULLBACK row by how often each pullback refreshed (2026-09-18 audit,
+    # finding A4). state_counts still counts every record, and is reported
+    # alongside so the two units are visible, never conflated.
+    by_id = {s.object_id: s for s in states}
     er_by_regime: dict[RegimeType, list[float]] = {}
     hurst_by_regime: dict[RegimeType, list[float]] = {}
     for state in states:
+        if is_lean_refresh(state, by_id):
+            continue
         er = _feature_value(state, _ER_FEATURE)
         if er is not None:
             er_by_regime.setdefault(state.regime, []).append(er)
@@ -368,6 +580,7 @@ def build_regime_report(
                 mean_efficiency_ratio=_mean_or_none(er_by_regime.get(regime, [])),
                 mean_hurst=_mean_or_none(hurst_by_regime.get(regime, [])),
                 is_momentary=not has_segments,
+                state_records=state_counts[regime],
             )
         )
 
@@ -405,43 +618,25 @@ def build_regime_report(
     )
 
 
-def _anticipation_accuracy(states: tuple[RegimeState, ...]) -> AnticipationAccuracy:
-    by_id = {s.object_id: s for s in states}
-    resolutions = 0
-    to_ret = 0
-    to_rev = 0
-    leaned = 0
-    matched = 0
-    for state in states:
-        if state.regime is RegimeType.RETRACEMENT:
-            resolutions += 1
-            to_ret += 1
-        elif state.regime is RegimeType.REVERSAL:
-            resolutions += 1
-            to_rev += 1
-        else:
-            continue
-        # Did the pullback this resolution superseded carry a directional lean?
-        prior = by_id.get(state.supersedes) if state.supersedes else None
-        lean = prior.anticipated_resolution if prior is not None else None
-        if lean in (AnticipatedResolution.RETRACEMENT, AnticipatedResolution.REVERSAL):
-            leaned += 1
-            if (
-                lean is AnticipatedResolution.RETRACEMENT
-                and state.regime is RegimeType.RETRACEMENT
-            ) or (
-                lean is AnticipatedResolution.REVERSAL
-                and state.regime is RegimeType.REVERSAL
-            ):
-                matched += 1
-    rate = (matched / leaned) if leaned else None
+def _anticipation_accuracy(states: Sequence[RegimeState]) -> AnticipationAccuracy:
+    resolutions = sum(
+        1 for s in states if s.regime in (RegimeType.RETRACEMENT, RegimeType.REVERSAL)
+    )
+    to_ret = sum(1 for s in states if s.regime is RegimeType.RETRACEMENT)
+    to_rev = sum(1 for s in states if s.regime is RegimeType.REVERSAL)
+    chains = build_lean_chains(states)
+    last = score_lean_chains(chains, horizon_bars=None)
+    origin = score_lean_chains(chains, horizon_bars=0)
     return AnticipationAccuracy(
         resolutions=resolutions,
         to_retracement=to_ret,
         to_reversal=to_rev,
-        leaned=leaned,
-        matched=matched,
-        rate=rate,
+        leaned=last.leaned,
+        matched=last.matched,
+        rate=last.rate,
+        origin_leaned=origin.leaned,
+        origin_matched=origin.matched,
+        origin_rate=origin.rate,
     )
 
 
@@ -465,10 +660,18 @@ def render_report_markdown(report: RegimeReport) -> str:
     lines.append("## Regime distribution")
     lines.append("")
     lines.append(
-        "| Regime | Count | Share | Total min | Mean min | "
+        "Units: **Count** = segments (runs with at least one bar; a zero-bar run is "
+        "dropped by build_regime_segments); **Records** = every RegimeState record "
+        "carrying that regime, including lean refreshes -- for PULLBACK_UNRESOLVED "
+        "these differ a lot. **Mean ER/Hurst** are over segment-entry records only "
+        "(refreshes excluded), one sample per segment."
+    )
+    lines.append("")
+    lines.append(
+        "| Regime | Count (segments) | Records | Share | Total min | Mean min | "
         "Median min | Mean ER | Mean Hurst |"
     )
-    lines.append("|---|--:|--:|--:|--:|--:|--:|--:|")
+    lines.append("|---|--:|--:|--:|--:|--:|--:|--:|--:|")
     any_momentary = False
     for s in report.per_regime:
         if s.is_momentary:
@@ -482,7 +685,7 @@ def render_report_markdown(report: RegimeReport) -> str:
             mean_str = f"{s.mean_minutes:.1f}"
             median_str = f"{s.median_minutes:.1f}"
         lines.append(
-            f"| {name} | {s.segment_count} | {share_str} | "
+            f"| {name} | {s.segment_count} | {s.state_records} | {share_str} | "
             f"{total_str} | {mean_str} | {median_str} | "
             f"{_fmt(s.mean_efficiency_ratio)} | {_fmt(s.mean_hurst)} |"
         )
@@ -534,15 +737,25 @@ def render_report_markdown(report: RegimeReport) -> str:
     lines.append("")
     lines.append(
         "The [VO-H] lean is recorded on a live PULLBACK_UNRESOLVED, never acted on "
-        "(gate G2). This is how often it agreed with the eventual resolution."
+        "(gate G2). Two scores, two information points -- read the ORIGIN score as "
+        "the honest one. The lean is a function of pullback depth and the outcome is "
+        "defined on that same depth, so the lean at the last refresh before "
+        "resolution is outcome-adjacent (near-tautological for short pullbacks); it "
+        "is kept only as a diagnostic (2026-09-18 audit, finding A2)."
     )
     lines.append("")
     lines.append(
         f"- Resolutions: **{a.resolutions}** "
         f"({a.to_retracement} retracement, {a.to_reversal} reversal)"
     )
-    lines.append(f"- Carried a directional lean: **{a.leaned}**")
-    lines.append(f"- Lean matched outcome: **{a.matched}**")
-    lines.append(f"- Match rate: **{_fmt(a.rate, 2) if a.rate is not None else 'n/a'}**")
+    lines.append(
+        f"- **Origin lean** (recorded when the pullback began): leaned "
+        f"**{a.origin_leaned}**, matched **{a.origin_matched}**, rate "
+        f"**{_fmt(a.origin_rate, 2) if a.origin_rate is not None else 'n/a'}**"
+    )
+    lines.append(
+        f"- Last-refresh lean (outcome-adjacent diagnostic): leaned {a.leaned}, "
+        f"matched {a.matched}, rate {_fmt(a.rate, 2) if a.rate is not None else 'n/a'}"
+    )
     lines.append("")
     return "\n".join(lines)

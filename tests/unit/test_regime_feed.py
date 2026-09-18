@@ -29,6 +29,7 @@ from vo.telemetry.regime_feed import (
     render_feed_lines,
     session_boundary_line,
     session_stat_line,
+    trim_warmup,
 )
 from vo.telemetry.regime_report import SessionRegimeStats
 from vo.time.sessions import SessionConfig, SessionWindow
@@ -597,3 +598,42 @@ def test_render_feed_lines_interleaves_all_three_event_types() -> None:
         fields = line.split(FEED_DELIMITER)
         if fields[0] == "SESN":
             assert len(fields) == 4
+
+
+# ── warm-up trim (2026-09-18 audit, finding C3) ───────────────────────────
+
+
+def test_trim_warmup_drops_clips_and_keeps_the_right_segments_and_markers() -> None:
+    states, bars = _resolution_scenario()
+    segments = build_regime_segments(states, bars)
+    markers = build_regime_markers(states, bars)
+    assert [s.regime for s in segments] == [
+        RegimeType.EXPANSION,
+        RegimeType.PULLBACK_UNRESOLVED,
+        RegimeType.EXPANSION,
+    ]
+    # Warm-up ends at bar 1: the first EXPANSION (bars 0..1) ends exactly at
+    # the boundary -> dropped; the PULLBACK (bars 1..2) starts at it -> kept
+    # unchanged; the final EXPANSION untouched; the RETRACEMENT marker at
+    # bar 2 is after the boundary -> kept.
+    kept, kept_markers = trim_warmup(segments, markers, warmup_end_utc=_at(1))
+    assert [s.regime for s in kept] == [RegimeType.PULLBACK_UNRESOLVED, RegimeType.EXPANSION]
+    assert kept[0].start_utc == _at(1)
+    assert len(kept_markers) == 1
+
+    # Warm-up ends mid-way through the pullback (bar 1.5): pullback is clipped
+    # to start there, its high/low untouched; the marker at bar 2 survives.
+    from datetime import timedelta
+
+    mid = _at(1) + timedelta(seconds=30)
+    kept, kept_markers = trim_warmup(segments, markers, warmup_end_utc=mid)
+    assert kept[0].regime is RegimeType.PULLBACK_UNRESOLVED
+    assert kept[0].start_utc == mid
+    assert kept[0].high == segments[1].high and kept[0].low == segments[1].low
+    assert len(kept_markers) == 1
+
+    # Warm-up past everything: nothing but the open-ended tail survives.
+    kept, kept_markers = trim_warmup(segments, markers, warmup_end_utc=_at(3))
+    assert [s.regime for s in kept] == [RegimeType.EXPANSION]
+    assert kept[0].start_utc == _at(3)
+    assert kept_markers == ()

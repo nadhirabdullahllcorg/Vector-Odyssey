@@ -58,6 +58,7 @@ from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_segments,
     build_session_boundaries,
     render_feed_lines,
+    trim_warmup,
 )
 from vo.telemetry.regime_report import build_session_breakdown  # noqa: E402
 from vo.time.brokers import BrokerProfile, load_broker_profiles, resolve_broker_utc  # noqa: E402
@@ -178,6 +179,25 @@ def build_feed_lines(config: EAConfig) -> list[str]:
     # they get a point marker instead of a dropped band.
     markers = build_regime_markers(states, sequence.bars)
 
+    # Warm-up trim (2026-09-18 audit, finding C3): the live wire only
+    # backfills a few hundred bars, and the engine's first classifications
+    # on a cold start are artifacts. Bars it needs before a first confirmed
+    # swing: the ATR window plus K on either side of a pivot, at the tier
+    # the regime engine is configured to read.
+    tier_cfg = (
+        swing_config.swing if regime_config.tier.name == "SWING" else swing_config.internal
+    )
+    warmup_bars = swing_config.atr_period + 2 * tier_cfg.k
+    trimmed_note = ""
+    if len(sequence.bars) > warmup_bars:
+        warmup_end_utc = sequence.bars[warmup_bars].open_time_utc
+        before = len(segments)
+        segments, markers = trim_warmup(segments, markers, warmup_end_utc=warmup_end_utc)
+        trimmed_note = (
+            f"# warmup_bars={warmup_bars} warmup_end_utc={warmup_end_utc.isoformat()} "
+            f"segments_dropped_or_clipped={before - len(segments)}"
+        )
+
     # Session-boundary lines: same config the live EA runtime uses (gate
     # G2 telemetry -- see regime_feed's SESSION BOUNDARIES section). Not
     # every deployment has a sessions.yaml entry for its symbol; skip
@@ -207,7 +227,7 @@ def build_feed_lines(config: EAConfig) -> list[str]:
             )
         return epoch
 
-    return render_feed_lines(
+    lines = render_feed_lines(
         segments,
         markers,
         boundaries,
@@ -215,6 +235,9 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         epoch_of=epoch_of,
         generated_utc=datetime.now(UTC),
     )
+    if trimmed_note:
+        lines.insert(1, trimmed_note)  # a second '#' comment line; the indicator skips it
+    return lines
 
 
 def _feed_path(config: EAConfig) -> Path:
@@ -233,16 +256,23 @@ def publish_once(config: EAConfig) -> int:
     # indicator has the feed open for its periodic read -- MQL5's FileOpen
     # grants no delete-sharing, so a concurrent rename is briefly refused.
     # The terminal's read handle closes within milliseconds, so retry.
-    for attempt in range(10):
+    # Root cause of the long holds (2026-09-18 audit, finding C1): the
+    # indicators used to walk every chart object while holding the feed
+    # open. Fixed on the MQL5 side (read-then-close, ObjectsDeleteAll by
+    # prefix); this retry loop stays as a safety net and now reports how
+    # hard it had to work, so a slow-but-successful cycle is visible.
+    for attempt in range(40):
         try:
             tmp.replace(out_path)
+            if attempt:
+                print(f"  (feed rename succeeded after {attempt} retries, {attempt * 0.25:.2f}s)")
             break
         except PermissionError:
-            if attempt == 9:
+            if attempt == 39:
                 raise
-            time.sleep(0.2)
-    event_count = max(len(lines) - 1, 0)  # minus header; bands + markers + session lines
-    return event_count
+            time.sleep(0.25)
+    header_lines = sum(1 for line in lines if line.startswith("#"))
+    return max(len(lines) - header_lines, 0)  # bands + markers + session lines
 
 
 def main() -> None:

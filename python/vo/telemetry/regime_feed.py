@@ -106,7 +106,7 @@ fields parse identically under v5 -- only the trailing two are new.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -383,6 +383,34 @@ _BAND_TAG = "BAND"
 _MARK_TAG = "MARK"
 _SESN_TAG = "SESN"
 _SSTAT_TAG = "SSTAT"
+
+
+def trim_warmup(
+    segments: Sequence[RegimeSegment],
+    markers: Sequence[RegimeMarker],
+    *,
+    warmup_end_utc: datetime,
+) -> tuple[tuple[RegimeSegment, ...], tuple[RegimeMarker, ...]]:
+    """Drop what the engine emitted before it could have known anything.
+
+    A cold-started RegimeEngine begins in CONSOLIDATION and the SwingEngine
+    beneath it needs an ATR window plus K bars either side of a pivot
+    before its first confirmed swing -- so the first bands of a feed built
+    from a short live-wire backfill are start-up artifacts, not regimes
+    (2026-09-18 audit, finding C3). Pure: a segment ending at/before
+    `warmup_end_utc` is dropped; one straddling it is clipped to start
+    there (its high/low stay whole-segment -- the band's price extent is
+    still honest, only its drawn start moves); markers before it are
+    dropped. Nothing is recomputed."""
+    kept: list[RegimeSegment] = []
+    for seg in segments:
+        if seg.end_utc is not None and seg.end_utc <= warmup_end_utc:
+            continue
+        if seg.start_utc < warmup_end_utc:
+            seg = replace(seg, start_utc=warmup_end_utc)
+        kept.append(seg)
+    kept_markers = tuple(m for m in markers if m.at_utc >= warmup_end_utc)
+    return tuple(kept), kept_markers
 
 
 def feed_header(

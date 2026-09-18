@@ -52,9 +52,12 @@ anticipation accounting rather than re-deriving it -- one dataset, sliced,
 not a second computation that could quietly disagree. Two known
 approximations, both named rather than hidden: (1) a segment spanning a
 year boundary is duration-attributed correctly (bar-counted per slice,
-never wall-clock), but its `segment_count`/`total_segments` bookkeeping
-in the per-period RegimeReport counts it once per year it touches, since
-segments are not literally split at the boundary; (2) anticipation
+never wall-clock) and counted once in EACH year it has bars in (segments
+are not literally split at the boundary) -- until the 2026-09-18 audit
+this function passed the whole run's segment list into every year's
+report, so every year showed the whole run's Count column (finding A1;
+fixed: a year now sees only the segments that have at least one bar in
+it, and its Span comes from its own bars); (2) anticipation
 accuracy for a resolution within a few bars of a year boundary is
 attributed to the year the RESOLUTION itself occurred in, even if its
 originating pullback began in the prior year -- a handful of instances
@@ -69,7 +72,7 @@ from __future__ import annotations
 
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from vo.market.bar import Bar
@@ -84,7 +87,16 @@ from vo.research.statistics import (
 )
 from vo.research.transitions import TransitionMatrix
 from vo.telemetry.regime_feed import RegimeSegment
-from vo.telemetry.regime_report import RegimeReport, build_regime_report
+from vo.telemetry.regime_report import (
+    HorizonScore,
+    RegimeReport,
+    _bar_counts_per_segment,
+    bar_offset,
+    build_lean_chains,
+    build_regime_report,
+    is_lean_refresh,
+    score_lean_chains,
+)
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 _ER_FEATURE = "efficiency_ratio"
@@ -94,6 +106,30 @@ _HURST_FEATURE = "hurst_exponent"
 # fixed row/column order every rendered matrix and table uses, so two
 # reports are always visually comparable.
 _ALL_REGIMES: tuple[RegimeType, ...] = tuple(RegimeType)
+
+# Transition-matrix cells that are 100% BY STATE-MACHINE DESIGN (Month 1's
+# transition structure, vo-phase-plan.md SS13-notes): CONSOLIDATION can only
+# leave through EXPANSION, EXPANSION can only leave through an unresolved
+# pullback, and a resolution re-enters EXPANSION on the same bar. They carry
+# no empirical content and are marked as such when rendered (finding A3).
+# The empirical rows are PULLBACK_UNRESOLVED -> {CONSOLIDATION, RETRACEMENT,
+# REVERSAL}.
+STRUCTURAL_TRANSITIONS: frozenset[tuple[RegimeType, RegimeType]] = frozenset(
+    {
+        (RegimeType.CONSOLIDATION, RegimeType.EXPANSION),
+        (RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED),
+        (RegimeType.RETRACEMENT, RegimeType.EXPANSION),
+        (RegimeType.REVERSAL, RegimeType.EXPANSION),
+    }
+)
+
+# What vo.observation.hurst.hurst_exponent reads on a pure Gaussian random
+# walk (true H = 0.5): about 0.44 (0.40-0.47 across seeds and window lengths
+# 20-200), measured 2026-09-18 on synthetic series and pinned by
+# tests/unit/test_hurst.py's calibration tests (finding B1). Every Hurst
+# figure in these reports is on THIS scale: "below 0.5" is not "below a
+# random walk" -- about 0.44 is.
+HURST_RANDOM_WALK_REFERENCE = 0.44
 
 
 def _feature_value(state: RegimeState, name: str) -> float | None:
@@ -146,15 +182,21 @@ def build_period_breakdown(
         year_states = tuple(s for s in states if s.observed_at.year == year)
         year_transitions = tuple(t for t in transitions_log if t.observed_at.year == year)
         last_bar = year_bars[-1]
+        # Only the segments that actually have a bar in this year (finding
+        # A1) -- the same predicate durations_by_regime already applies, so
+        # Count and duration columns now describe the same population.
+        in_year = _bar_counts_per_segment(segments, year_bars)
+        year_segments = tuple(seg for seg, n in zip(segments, in_year, strict=True) if n > 0)
         sub = build_regime_report(
-            segments=tuple(segments),  # full list -- a boundary-spanning segment still
-            states=year_states,  # attributes its in-year bars correctly (see docstring)
+            segments=year_segments,
+            states=year_states,
             transitions_log=year_transitions,
             history_end_utc=last_bar.open_time_utc,
             minutes_per_bar=minutes_per_bar,
             bar_count=len(year_bars),
             bars=year_bars,
         )
+        sub = replace(sub, first_utc=year_bars[0].open_time_utc)
         is_complete_year = last_bar.open_time_utc.month == 12 and last_bar.open_time_utc.day >= 28
         label = f"{year}" if is_complete_year else f"{year} (YTD)"
         periods.append(PeriodReport(label=label, report=sub))
@@ -217,8 +259,10 @@ def build_duration_distributions(
 
 @dataclass(frozen=True)
 class EvidenceGroupStats:
-    """Descriptive stats for one (regime, feature) group -- ER or Hurst,
-    within one regime's recorded RegimeState population."""
+    """Descriptive stats for one (regime, feature) group -- ER or Hurst --
+    over that regime's segment-ENTRY records (one sample per segment;
+    lean-refresh records excluded, finding A4). `records_all` is the
+    count including refreshes, shown alongside so the unit is explicit."""
 
     regime: RegimeType
     feature: str  # "efficiency_ratio" or "hurst_exponent"
@@ -228,6 +272,7 @@ class EvidenceGroupStats:
     stdev: float | None  # None when n < 2 -- statistics.stdev needs 2+ points
     p25: float
     p75: float
+    records_all: int = 0
 
 
 @dataclass(frozen=True)
@@ -238,11 +283,14 @@ class EvidenceComparison:
     hurst_retracement_vs_reversal: MannWhitneyResult
 
 
-def _group_stats(regime: RegimeType, feature: str, values: list[float]) -> EvidenceGroupStats:
+def _group_stats(
+    regime: RegimeType, feature: str, values: list[float], *, records_all: int = 0
+) -> EvidenceGroupStats:
     return EvidenceGroupStats(
         regime=regime,
         feature=feature,
         n=len(values),
+        records_all=records_all,
         mean=statistics.fmean(values),
         median=statistics.median(values),
         stdev=statistics.stdev(values) if len(values) >= 2 else None,
@@ -258,23 +306,34 @@ def build_evidence_comparison(states: Sequence[RegimeState]) -> EvidenceComparis
     difference, or two heavily overlapping distributions with different
     means. See the module docstring: this is hypothesis-generating, not
     a rule."""
+    by_id = {s.object_id: s for s in states}
     er_values: dict[RegimeType, list[float]] = {}
     hurst_values: dict[RegimeType, list[float]] = {}
+    er_records_all: dict[RegimeType, int] = {}
+    hurst_records_all: dict[RegimeType, int] = {}
     for state in states:
         er = _feature_value(state, _ER_FEATURE)
+        hurst = _feature_value(state, _HURST_FEATURE)
+        if er is not None:
+            er_records_all[state.regime] = er_records_all.get(state.regime, 0) + 1
+        if hurst is not None:
+            hurst_records_all[state.regime] = hurst_records_all.get(state.regime, 0) + 1
+        if is_lean_refresh(state, by_id):
+            continue  # one sample per segment (finding A4)
         if er is not None:
             er_values.setdefault(state.regime, []).append(er)
-        hurst = _feature_value(state, _HURST_FEATURE)
         if hurst is not None:
             hurst_values.setdefault(state.regime, []).append(hurst)
 
     er_stats = tuple(
-        _group_stats(regime, _ER_FEATURE, er_values[regime])
+        _group_stats(regime, _ER_FEATURE, er_values[regime], records_all=er_records_all[regime])
         for regime in _ALL_REGIMES
         if er_values.get(regime)
     )
     hurst_stats = tuple(
-        _group_stats(regime, _HURST_FEATURE, hurst_values[regime])
+        _group_stats(
+            regime, _HURST_FEATURE, hurst_values[regime], records_all=hurst_records_all[regime]
+        )
         for regime in _ALL_REGIMES
         if hurst_values.get(regime)
     )
@@ -328,6 +387,18 @@ class AccuracyValidation:
     by_rth: tuple[AccuracySlice, ...]
     by_confidence_quartile: tuple[AccuracySlice, ...]
     by_pullback_duration_quartile: tuple[AccuracySlice, ...]
+    """Last-refresh lean by how long the pullback ran -- the outcome-adjacent
+    diagnostic (finding A2). Compare with by_pullback_duration_quartile_origin."""
+    by_horizon: tuple[HorizonScore, ...] = ()
+    """The lean scored at fixed information points: origin, +k bars (survivors
+    only), and last refresh -- see regime_report.score_lean_chains."""
+    by_pullback_duration_quartile_origin: tuple[AccuracySlice, ...] = ()
+    """ORIGIN lean by how long the pullback ran -- the fixed-information-point
+    version of by_pullback_duration_quartile."""
+    confidence_is_constant: bool = False
+    """True when every leaned pullback carried the same confidence value
+    (RegimeEngine stamps 0.5 on every pullback record today), in which case
+    by_confidence_quartile cannot slice anything (finding B2)."""
 
 
 def _quartile_label(value: float, cuts: tuple[float, float, float]) -> str:
@@ -345,40 +416,31 @@ def build_accuracy_validation(
     states: Sequence[RegimeState],
     *,
     session_config: SessionConfig | None = None,
+    bars: Sequence[Bar] = (),
+    minutes_per_bar: float = 1.0,
+    horizons_bars: Sequence[int] = (3, 5, 10),
 ) -> AccuracyValidation:
     """Everything regime_report._anticipation_accuracy computes (same
-    one-hop supersedes lookup, same "leaned"/"matched"/"rate" definitions
-    -- this does not change what those numbers mean), plus: the class-
-    imbalance-aware baseline comparison, significance tests against BOTH
-    50% and the majority-class baseline, a Wilson interval, and three
-    conditional-accuracy slices (session, the pullback's own recorded
-    confidence, and how long the pullback ran before resolving)."""
-    by_id = {s.object_id: s for s in states}
+    build_lean_chains/score_lean_chains implementation -- the two reports
+    cannot score a lean differently), plus: the class-imbalance-aware
+    baseline comparison, significance tests against BOTH 50% and the
+    majority-class baseline, a Wilson interval, conditional-accuracy
+    slices (session, RTH, confidence, pullback duration), and -- since the
+    2026-09-18 audit -- the lean scored at FIXED information points
+    (origin, +k bars on the survivors, last refresh), because the last-
+    refresh score alone is outcome-adjacent (finding A2).
 
-    def _pullback_origin(state: RegimeState) -> RegimeState:
-        """Walk supersedes back through however many lean-refresh records
-        preceded this one, to the record where the pullback FIRST began
-        (see the module docstring on why: a lean can be re-recorded
-        several times before resolution, each superseding the last)."""
-        cur = state
-        while cur.supersedes is not None:
-            prior = by_id.get(cur.supersedes)
-            if prior is None or prior.regime is not RegimeType.PULLBACK_UNRESOLVED:
-                break
-            cur = prior
-        return cur
+    The headline `leaned`/`matched`/`rate` remain the last-refresh figures
+    for continuity with earlier reports; `by_horizon` carries the honest
+    ones and the renderer says which is which."""
+    chains = build_lean_chains(states)
+    bar_index: dict[datetime, int] = {
+        b.open_time_utc: i for i, b in enumerate(sorted(bars, key=lambda b: b.open_time_utc))
+    }
 
     resolutions = 0
     to_ret = 0
     to_rev = 0
-    leaned = 0
-    matched = 0
-    session_hits: dict[str, list[bool]] = {}
-    rth_hits: dict[str, list[bool]] = {}
-    confidence_values: list[float] = []
-    duration_values: list[float] = []
-    leaned_records: list[tuple[RegimeState, RegimeState, bool]] = []  # (resolution, prior, matched)
-
     for state in states:
         if state.regime is RegimeType.RETRACEMENT:
             resolutions += 1
@@ -386,35 +448,49 @@ def build_accuracy_validation(
         elif state.regime is RegimeType.REVERSAL:
             resolutions += 1
             to_rev += 1
-        else:
+
+    last = score_lean_chains(chains, horizon_bars=None)
+    leaned = last.leaned
+    matched = last.matched
+
+    session_hits: dict[str, list[bool]] = {}
+    rth_hits: dict[str, list[bool]] = {}
+    confidence_pairs: list[tuple[float, bool]] = []
+    duration_pairs_last: list[tuple[float, bool]] = []
+    duration_pairs_origin: list[tuple[float, bool]] = []
+
+    for chain in chains:
+        outcome = chain.resolution.regime
+        lean_last = chain.last.anticipated_resolution
+        lean_origin = chain.origin.anticipated_resolution
+        duration_bars = float(
+            bar_offset(chain.resolution, chain.origin, bar_index, minutes_per_bar)
+        )
+        duration_minutes = duration_bars * minutes_per_bar
+
+        if lean_origin in (AnticipatedResolution.RETRACEMENT, AnticipatedResolution.REVERSAL):
+            origin_match = (
+                lean_origin is AnticipatedResolution.RETRACEMENT
+                and outcome is RegimeType.RETRACEMENT
+            ) or (lean_origin is AnticipatedResolution.REVERSAL and outcome is RegimeType.REVERSAL)
+            duration_pairs_origin.append((duration_minutes, origin_match))
+
+        if lean_last not in (AnticipatedResolution.RETRACEMENT, AnticipatedResolution.REVERSAL):
             continue
-        prior = by_id.get(state.supersedes) if state.supersedes else None
-        lean = prior.anticipated_resolution if prior is not None else None
-        if lean not in (AnticipatedResolution.RETRACEMENT, AnticipatedResolution.REVERSAL):
-            continue
-        leaned += 1
         is_match = (
-            lean is AnticipatedResolution.RETRACEMENT and state.regime is RegimeType.RETRACEMENT
-        ) or (lean is AnticipatedResolution.REVERSAL and state.regime is RegimeType.REVERSAL)
-        if is_match:
-            matched += 1
-        leaned_records.append((state, prior, is_match))  # type: ignore[arg-type]
+            lean_last is AnticipatedResolution.RETRACEMENT and outcome is RegimeType.RETRACEMENT
+        ) or (lean_last is AnticipatedResolution.REVERSAL and outcome is RegimeType.REVERSAL)
 
         if session_config is not None:
-            window = session_at(state.observed_at.astimezone(session_config.zone), session_config)
+            when = chain.resolution.observed_at.astimezone(session_config.zone)
+            window = session_at(when, session_config)
             session_name = window.name if window is not None else OFF_SESSION_LABEL
             session_hits.setdefault(session_name, []).append(is_match)
-            rth_label = (
-                "RTH"
-                if is_rth(state.observed_at.astimezone(session_config.zone), session_config)
-                else "NON_RTH"
-            )
+            rth_label = "RTH" if is_rth(when, session_config) else "NON_RTH"
             rth_hits.setdefault(rth_label, []).append(is_match)
 
-        confidence_values.append(prior.confidence)  # type: ignore[union-attr]
-        origin = _pullback_origin(prior)  # type: ignore[arg-type]
-        duration_minutes = (state.observed_at - origin.observed_at).total_seconds() / 60.0
-        duration_values.append(duration_minutes)
+        confidence_pairs.append((chain.last.confidence, is_match))
+        duration_pairs_last.append((duration_minutes, is_match))
 
     rate = (matched / leaned) if leaned else None
 
@@ -433,33 +509,29 @@ def build_accuracy_validation(
         vs_coin_flip = None
         wilson = None
 
-    by_session = tuple(
-        AccuracySlice(
-            label=name,
-            n=len(hits),
-            matched=sum(hits),
-            rate=(sum(hits) / len(hits)) if hits else None,
+    def _slices(hits: dict[str, list[bool]]) -> tuple[AccuracySlice, ...]:
+        return tuple(
+            AccuracySlice(
+                label=name,
+                n=len(h),
+                matched=sum(h),
+                rate=(sum(h) / len(h)) if h else None,
+            )
+            for name, h in sorted(hits.items())
         )
-        for name, hits in sorted(session_hits.items())
-    )
 
-    by_rth = tuple(
-        AccuracySlice(
-            label=name,
-            n=len(hits),
-            matched=sum(hits),
-            rate=(sum(hits) / len(hits)) if hits else None,
-        )
-        for name, hits in sorted(rth_hits.items())
-    )
+    confidence_values = {c for c, _m in confidence_pairs}
+    confidence_is_constant = len(confidence_values) <= 1 and bool(confidence_pairs)
 
-    confidence_pairs = zip(leaned_records, confidence_values, strict=True)
-    by_confidence_quartile = _quartile_slices(
-        [(conf, is_match) for (_s, _p, is_match), conf in confidence_pairs]
-    )
-    duration_pairs = zip(leaned_records, duration_values, strict=True)
-    by_duration_quartile = _quartile_slices(
-        [(dur, is_match) for (_s, _p, is_match), dur in duration_pairs]
+    by_horizon = (
+        score_lean_chains(chains, horizon_bars=0),
+        *(
+            score_lean_chains(
+                chains, horizon_bars=k, bar_index=bar_index, minutes_per_bar=minutes_per_bar
+            )
+            for k in horizons_bars
+        ),
+        last,
     )
 
     return AccuracyValidation(
@@ -474,10 +546,13 @@ def build_accuracy_validation(
         vs_coin_flip=vs_coin_flip,
         vs_majority_baseline=vs_majority,
         wilson_ci=wilson,
-        by_session=by_session,
-        by_rth=by_rth,
-        by_confidence_quartile=by_confidence_quartile,
-        by_pullback_duration_quartile=by_duration_quartile,
+        by_session=_slices(session_hits),
+        by_rth=_slices(rth_hits),
+        by_confidence_quartile=() if confidence_is_constant else _quartile_slices(confidence_pairs),
+        by_pullback_duration_quartile=_quartile_slices(duration_pairs_last),
+        by_horizon=by_horizon,
+        by_pullback_duration_quartile_origin=_quartile_slices(duration_pairs_origin),
+        confidence_is_constant=confidence_is_constant,
     )
 
 
@@ -586,7 +661,10 @@ def render_validation_report_markdown(
     lines.append(
         "Per-period detail (regime distribution, transitions, anticipation accuracy) "
         "follows the same table format as the plain backtest report, one subsection "
-        "per period:"
+        "per period. Units: Count = segments with at least one bar in the year (a "
+        "segment spanning New Year is counted in both years); Records = every "
+        "RegimeState record in the year, lean refreshes included; Mean ER/Hurst are "
+        "over segment-entry records only."
     )
     lines.append("")
     for period in periods:
@@ -604,12 +682,14 @@ def render_validation_report_markdown(
             f"rate: {_fmt(pa.rate, 2) if pa.rate is not None else 'n/a'}"
         )
         lines.append("")
-        lines.append("| Regime | Count | Share | Mean ER | Mean Hurst |")
-        lines.append("|---|--:|--:|--:|--:|")
+        lines.append(
+            "| Regime | Count (segments in year) | Records | Share | Mean ER | Mean Hurst |"
+        )
+        lines.append("|---|--:|--:|--:|--:|--:|")
         for s in r.per_regime:
             share_str = "—" if s.is_momentary else f"{s.share * 100:.1f}%"
             lines.append(
-                f"| {s.regime.name} | {s.segment_count} | {share_str} | "
+                f"| {s.regime.name} | {s.segment_count} | {s.state_records} | {share_str} | "
                 f"{_fmt(s.mean_efficiency_ratio)} | {_fmt(s.mean_hurst)} |"
             )
         lines.append("")
@@ -634,8 +714,19 @@ def render_validation_report_markdown(
             count = transition_matrix.counts.get((frm, to), 0)
             prob = transition_matrix.probability(frm, to)
             prob_str = f" ({prob * 100:.0f}%)" if prob else ""
-            cells.append(f"{count}{prob_str}")
+            mark = " †" if count and (frm, to) in STRUCTURAL_TRANSITIONS else ""
+            cells.append(f"{count}{prob_str}{mark}")
         lines.append(f"| {frm.name} | " + " | ".join(cells) + f" | {row_total} |")
+    lines.append("")
+    lines.append(
+        "† structural: 100% by state-machine design (Month 1 transition structure), not "
+        "an empirical finding. The empirical row is PULLBACK_UNRESOLVED → "
+        "{CONSOLIDATION, RETRACEMENT, REVERSAL}. Units: transitions from the engine's "
+        "own RegimeTransition log -- these exceed segment counts by the number of "
+        "zero-bar runs (a resolution and the next pullback on the same bar) that "
+        "build_regime_segments drops, which is why 'transitions into EXPANSION' and "
+        "'EXPANSION segments' legitimately differ."
+    )
     lines.append("")
 
     # 3. Duration distributions
@@ -660,12 +751,23 @@ def render_validation_report_markdown(
     # 4. ER/Hurst relationship
     lines.append("## 4. ER / Hurst relationship")
     lines.append("")
-    lines.append("| Regime | Feature | n | Mean | Median | Stdev | P25 | P75 |")
-    lines.append("|---|---|--:|--:|--:|--:|--:|--:|")
+    lines.append(
+        "Units: **n** = segment-entry records (one sample per segment; lean-refresh "
+        "records excluded, so a long pullback that refreshed its lean forty times "
+        "weighs the same as a two-bar one); **records** = the same regime's record "
+        "count including refreshes, shown so the two populations are never conflated. "
+        f"Hurst scale: vo.observation.hurst reads about **{HURST_RANDOM_WALK_REFERENCE:.2f}** "
+        "(0.40-0.47) on a pure random walk (true H = 0.5) across window lengths 20-200, so compare "
+        "Hurst figures against that reference, not against 0.5."
+    )
+    lines.append("")
+    lines.append("| Regime | Feature | n (entries) | records | Mean | Median | Stdev | P25 | P75 |")
+    lines.append("|---|---|--:|--:|--:|--:|--:|--:|--:|")
     for group in (*evidence.er_by_regime, *evidence.hurst_by_regime):
         lines.append(
-            f"| {group.regime.name} | {group.feature} | {group.n} | {group.mean:.3f} | "
-            f"{group.median:.3f} | {_fmt(group.stdev)} | {group.p25:.3f} | {group.p75:.3f} |"
+            f"| {group.regime.name} | {group.feature} | {group.n} | {group.records_all} | "
+            f"{group.mean:.3f} | {group.median:.3f} | {_fmt(group.stdev)} | "
+            f"{group.p25:.3f} | {group.p75:.3f} |"
         )
     lines.append("")
     lines.append(
@@ -744,11 +846,51 @@ def render_validation_report_markdown(
         )
         lines.append("")
 
+    lines.append("### By information point (which lean is being scored)")
+    lines.append("")
+    lines.append(
+        "The lean is refreshed as a pullback deepens, and the outcome is defined on "
+        "that same depth -- so the lean at the last refresh before resolution is "
+        "outcome-adjacent (near-tautological for 1-2 bar pullbacks, anti-correlated "
+        "for long ones; 2026-09-18 audit, finding A2). **Read the ORIGIN row as the "
+        "honest score.** A +k-bars row scores only the pullbacks that were still "
+        "unresolved after bar k (survivors), each against its own majority baseline."
+    )
+    lines.append("")
+    lines.append(
+        "| Information point | Eligible | Leaned | Matched | Rate | "
+        "Majority baseline (eligible) |"
+    )
+    lines.append("|---|--:|--:|--:|--:|--:|")
+    for h in a.by_horizon:
+        rate_s = _fmt(h.rate, 4) if h.rate is not None else "n/a"
+        base = h.majority_baseline_rate
+        base_s = _fmt(base, 4) if base is not None else "n/a"
+        lines.append(
+            f"| {h.label} | {h.eligible} | {h.leaned} | {h.matched} | {rate_s} | {base_s} |"
+        )
+    lines.append("")
+    if a.confidence_is_constant:
+        lines.append(
+            "### By pullback confidence (quartile) — not informative: every pullback "
+            "record carries the same confidence value (RegimeEngine stamps a constant "
+            "on PULLBACK_UNRESOLVED today), so there is nothing to slice (finding B2)."
+        )
+        lines.append("")
+
     for title, slices in (
-        ("By session", a.by_session),
-        ("By RTH", a.by_rth),
-        ("By pullback confidence (quartile)", a.by_confidence_quartile),
-        ("By pullback duration before resolution (quartile)", a.by_pullback_duration_quartile),
+        ("By session (last-refresh lean)", a.by_session),
+        ("By RTH (last-refresh lean)", a.by_rth),
+        ("By pullback confidence (quartile, last-refresh lean)", a.by_confidence_quartile),
+        (
+            "By pullback duration before resolution (quartile) — ORIGIN lean, bar-counted",
+            a.by_pullback_duration_quartile_origin,
+        ),
+        (
+            "By pullback duration before resolution (quartile) — last-refresh lean "
+            "(outcome-adjacent diagnostic; the 99%→21% gradient lives here)",
+            a.by_pullback_duration_quartile,
+        ),
     ):
         if not slices:
             continue

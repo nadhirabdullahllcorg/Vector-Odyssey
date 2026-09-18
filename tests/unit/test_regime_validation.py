@@ -516,3 +516,167 @@ def test_render_validation_report_markdown_smoke() -> None:
     assert "## 4. ER / Hurst relationship" in markdown
     assert "## 5. Anticipation lean accuracy" in markdown
     assert "not a trading edge" in markdown
+
+
+# ── 2026-09-18 audit regressions ──────────────────────────────────────────
+
+
+def test_period_breakdown_counts_only_segments_with_bars_in_that_year() -> None:
+    """Finding A1: every year used to show the whole run's segment Count
+    (and the whole run's Span start). A segment wholly in 2023 must not
+    appear in 2024's Count, and 2024's Span must start at its own first bar."""
+    t2023 = datetime(2023, 6, 1, 0, 0, tzinfo=UTC)
+    t2024 = datetime(2024, 6, 1, 0, 0, tzinfo=UTC)
+    states = (
+        _state(RegimeType.EXPANSION, t2023, direction=RegimeDirection.UP),
+        _state(RegimeType.CONSOLIDATION, t2023 + timedelta(minutes=2)),
+        _state(RegimeType.EXPANSION, t2024, direction=RegimeDirection.DOWN),
+    )
+    bars = tuple(
+        _bar(t)
+        for t in (
+            t2023,
+            t2023 + timedelta(minutes=1),
+            t2023 + timedelta(minutes=2),
+            t2023 + timedelta(minutes=3),
+            t2024,
+            t2024 + timedelta(minutes=1),
+        )
+    )
+    segments = build_regime_segments(states, bars)
+    assert len(segments) == 3
+    periods = build_period_breakdown(segments, states, (), bars)
+    by_year = {p.label[:4]: p.report for p in periods}  # both years end mid-year -> "(YTD)"
+    r2023 = by_year["2023"]
+    r2024 = by_year["2024"]
+    assert r2023.total_segments == 2
+    assert r2024.total_segments == 1
+    counts_2023 = {s.regime: s.segment_count for s in r2023.per_regime}
+    counts_2024 = {s.regime: s.segment_count for s in r2024.per_regime}
+    assert counts_2023[RegimeType.CONSOLIDATION] == 1
+    assert RegimeType.CONSOLIDATION not in counts_2024
+    assert counts_2024[RegimeType.EXPANSION] == 1
+    assert r2024.first_utc == t2024
+    assert r2023.first_utc == t2023
+
+
+def test_period_breakdown_counts_a_boundary_spanning_segment_in_both_years() -> None:
+    """Named approximation, now true as stated: a segment with bars on both
+    sides of New Year counts once in each year."""
+    dec31 = datetime(2023, 12, 31, 23, 58, tzinfo=UTC)
+    states = (_state(RegimeType.EXPANSION, dec31, direction=RegimeDirection.UP),)
+    bars = tuple(_bar(dec31 + timedelta(minutes=i)) for i in range(5))  # crosses midnight
+    segments = build_regime_segments(states, bars)
+    periods = build_period_breakdown(segments, states, (), bars)
+    assert [p.report.total_segments for p in periods] == [1, 1]
+
+
+def test_accuracy_validation_scores_origin_and_last_refresh_separately() -> None:
+    """Finding A2: the origin lean (fixed information point) and the
+    last-refresh lean (outcome-adjacent) are scored separately. Origin said
+    REVERSAL, the refresh flipped to RETRACEMENT, outcome RETRACEMENT:
+    last-refresh matches, origin does not."""
+    origin = _state(
+        RegimeType.PULLBACK_UNRESOLVED, _at(0), anticipated=AnticipatedResolution.REVERSAL
+    )
+    refreshed = _state(
+        RegimeType.PULLBACK_UNRESOLVED,
+        _at(5),
+        anticipated=AnticipatedResolution.RETRACEMENT,
+        supersedes=origin.object_id,
+        suffix="b",
+    )
+    resolution = _state(RegimeType.RETRACEMENT, _at(6), supersedes=refreshed.object_id)
+    bars = tuple(_bar(_at(i)) for i in range(8))
+    accuracy = build_accuracy_validation((origin, refreshed, resolution), bars=bars)
+    by_label = {h.label: h for h in accuracy.by_horizon}
+    origin_score = next(h for h in accuracy.by_horizon if h.label.startswith("origin"))
+    last_score = next(h for h in accuracy.by_horizon if h.label.startswith("last refresh"))
+    assert last_score.matched == 1 and last_score.leaned == 1
+    assert origin_score.matched == 0 and origin_score.leaned == 1
+    assert accuracy.matched == 1  # headline stays the last-refresh figure, labelled as such
+    # +3 bars: the pullback lasted 6 bars, so it is a survivor; the lean in
+    # effect at bar 3 is still the origin lean (the refresh came at bar 5).
+    plus3 = by_label["+3 bars after origin (survivors only)"]
+    assert plus3.eligible == 1 and plus3.matched == 0
+    # +10 bars: resolved before the horizon -> not a forecast, not eligible.
+    plus10 = by_label["+10 bars after origin (survivors only)"]
+    assert plus10.eligible == 0
+
+
+def test_accuracy_validation_flags_constant_confidence_instead_of_slicing_it() -> None:
+    """Finding B2: RegimeEngine stamps 0.5 on every pullback record, so a
+    confidence quartile table would be one bucket pretending to be four."""
+    states: list[RegimeState] = []
+    for i in range(6):
+        pb = _state(
+            RegimeType.PULLBACK_UNRESOLVED,
+            _at(10 * i),
+            anticipated=AnticipatedResolution.RETRACEMENT,
+            confidence=0.5,
+            suffix=f"p{i}",
+        )
+        states.append(pb)
+        states.append(_state(RegimeType.RETRACEMENT, _at(10 * i + 1), supersedes=pb.object_id))
+    accuracy = build_accuracy_validation(states)
+    assert accuracy.confidence_is_constant is True
+    assert accuracy.by_confidence_quartile == ()
+    rendered = render_validation_report_markdown(
+        instrument_key="US100",
+        timeframe_canonical="M1",
+        generated_utc=_at(0),
+        periods=(),
+        transition_matrix=build_transition_matrix(()),
+        durations=(),
+        evidence=build_evidence_comparison(states),
+        accuracy=accuracy,
+    )
+    assert "not informative" in rendered
+
+
+def test_evidence_comparison_samples_one_record_per_segment_entry() -> None:
+    """Finding A4: lean-refresh records must not inflate the PULLBACK
+    population. Three PULLBACK records in one chain (origin + 2 refreshes)
+    = 1 entry sample, 3 records."""
+    er = lambda v: (RegimeFeature(name="efficiency_ratio", value=v, methodology="t"),)  # noqa: E731
+    origin = _state(RegimeType.PULLBACK_UNRESOLVED, _at(0), features=er(0.1))
+    r1 = _state(
+        RegimeType.PULLBACK_UNRESOLVED,
+        _at(1),
+        features=er(0.9),
+        supersedes=origin.object_id,
+        suffix="a",
+    )
+    r2 = _state(
+        RegimeType.PULLBACK_UNRESOLVED,
+        _at(2),
+        features=er(0.9),
+        supersedes=r1.object_id,
+        suffix="b",
+    )
+    evidence = build_evidence_comparison((origin, r1, r2))
+    group = evidence.er_by_regime[0]
+    assert group.n == 1
+    assert group.records_all == 3
+    assert group.mean == pytest.approx(0.1)
+
+
+def test_rendered_transition_matrix_marks_structural_edges() -> None:
+    """Finding A3: EXPANSION -> PULLBACK is 100% by state-machine design and
+    must be marked as such, not presented as a finding."""
+    t = (
+        _transition(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED, _at(0)),
+        _transition(RegimeType.PULLBACK_UNRESOLVED, RegimeType.RETRACEMENT, _at(1)),
+    )
+    rendered = render_validation_report_markdown(
+        instrument_key="US100",
+        timeframe_canonical="M1",
+        generated_utc=_at(0),
+        periods=(),
+        transition_matrix=build_transition_matrix(t),
+        durations=(),
+        evidence=build_evidence_comparison(()),
+        accuracy=build_accuracy_validation(()),
+    )
+    assert "1 (100%) †" in rendered
+    assert "structural: 100% by state-machine design" in rendered

@@ -84,6 +84,7 @@ root -- see REPORTS_DIR below.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime
@@ -247,6 +248,73 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool
     )
 
 
+def _git_short_hash() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return out.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _provenance_header(
+    *,
+    broker_symbol: str,
+    bar_count: int,
+    first_utc: datetime | None,
+    last_utc: datetime | None,
+    regime_config: object,
+    swing_config: object,
+) -> str:
+    """Stamped at the top of EVERY report this script writes (2026-09-18
+    audit, finding B3): without it a report cannot say which classifier
+    configuration produced it, and regime.yaml has already changed
+    meaning twice (v1->v2 body-based boundaries, v2->v3 ER 10->14)."""
+    rc = regime_config
+    sc = swing_config
+    span = "n/a"
+    if first_utc is not None and last_utc is not None:
+        span = f"{first_utc.isoformat()} -> {last_utc.isoformat()} (UTC)"
+    rows = [
+        "> **Provenance** — read this before comparing to any other report.",
+        f"> git: `{_git_short_hash()}` · generated: {datetime.now(UTC).isoformat()} (UTC)",
+        f"> instrument: `{broker_symbol}` · bars: {bar_count} · span: {span}",
+        (
+            f"> regime.yaml: version **{getattr(rc, 'version', '?')}** · "
+            f"tier {getattr(rc, 'tier', '?')} · "
+            f"efficiency_ratio_period {getattr(rc, 'efficiency_ratio_period', '?')} · "
+            f"hurst_period {getattr(rc, 'hurst_period', '?')}"
+        ),
+        (
+            f"> swings.yaml: version **{getattr(sc, 'version', '?')}** · atr_period "
+            f"{getattr(sc, 'atr_period', '?')}"
+        ),
+        "> hurst scale: vo.observation.hurst reads about 0.44 (0.40-0.47) on a pure random "
+        "walk, not 0.50 (see regime_validation.HURST_RANDOM_WALK_REFERENCE)",
+        "",
+        "",
+    ]
+    return "\n".join(rows)
+
+
+def _write_report(path: Path, markdown: str, header: str) -> None:
+    """Every report goes through here so none can be written without its
+    provenance header."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the report's own H1 first, then the provenance block.
+    if markdown.startswith("# "):
+        title, _nl, rest = markdown.partition("\n")
+        path.write_text(f"{title}\n\n{header}{rest.lstrip(chr(10))}", encoding="utf-8")
+    else:
+        path.write_text(header + markdown, encoding="utf-8")
+
+
 def _write_feed_atomic(out_path: Path, text: str) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(".feed.tmp")
@@ -371,6 +439,14 @@ def main() -> None:
     # (report.per_session) can be reused as the feed's SSTAT lines below,
     # instead of calling build_session_breakdown a second time.
     history_end = sequence.bars[-1].open_time_utc
+    provenance = _provenance_header(
+        broker_symbol=config.broker_symbol,
+        bar_count=len(sequence),
+        first_utc=sequence.bars[0].open_time_utc,
+        last_utc=history_end,
+        regime_config=regime_config,
+        swing_config=swing_config,
+    )
     report = build_regime_report(
         segments,
         states,
@@ -383,7 +459,7 @@ def main() -> None:
     markdown = render_report_markdown(report)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_path = REPORTS_DIR / f"regime_backtest_{config.broker_symbol}.md"
-    report_path.write_text(markdown, encoding="utf-8")
+    _write_report(report_path, markdown, provenance)
 
     # 2. Full-history feed for VO_ReferenceLevels.mq5 (regime drawing moved
     # there, v4) -- session_stats (SSTAT lines) reuse report.per_session so
@@ -399,7 +475,12 @@ def main() -> None:
         epoch_of=epoch_of,
         generated_utc=datetime.now(UTC),
     )
-    feed_path = config.wire.dir / f"{config.broker_symbol}_regime.feed"
+    # Full-history feed gets its OWN file name (2026-09-18 audit, finding C3):
+    # publish_regime.py --watch writes <symbol>_regime.feed from the live
+    # wire's ~500-bar backfill, and used to overwrite this deep-history feed
+    # the moment it ran. VO_Regime.mq5's InpFeedName input selects which one
+    # to draw.
+    feed_path = config.wire.dir / f"{config.broker_symbol}_regime_history.feed"
     feed_written = True
     try:
         _write_feed_atomic(feed_path, ("\n".join(feed_lines) + "\n") if feed_lines else "")
@@ -432,7 +513,9 @@ def main() -> None:
             durations_by_regime(segments, bars=sequence.bars)
         )
         evidence = build_evidence_comparison(states)
-        accuracy = build_accuracy_validation(states, session_config=session_config)
+        accuracy = build_accuracy_validation(
+            states, session_config=session_config, bars=sequence.bars
+        )
         validation_markdown = render_validation_report_markdown(
             instrument_key=config.broker_symbol,
             timeframe_canonical="M1",
@@ -444,7 +527,7 @@ def main() -> None:
             accuracy=accuracy,
         )
         validation_report_path = REPORTS_DIR / f"regime_validation_{config.broker_symbol}.md"
-        validation_report_path.write_text(validation_markdown, encoding="utf-8")
+        _write_report(validation_report_path, validation_markdown, provenance)
         print(
             f"  -> validation report built in {time.monotonic() - _t_validate:.1f}s", flush=True
         )
@@ -499,7 +582,7 @@ def main() -> None:
             out_of_sample=out_of_sample,
         )
         hurst_report_path = REPORTS_DIR / f"hurst_report_{config.broker_symbol}.md"
-        hurst_report_path.write_text(hurst_markdown, encoding="utf-8")
+        _write_report(hurst_report_path, hurst_markdown, provenance)
         print(f"  -> Hurst report built in {time.monotonic() - _t_hurst:.1f}s", flush=True)
 
     er_report_path: Path | None = None
@@ -558,7 +641,7 @@ def main() -> None:
             out_of_sample=er_out_of_sample,
         )
         er_report_path = REPORTS_DIR / f"efficiency_ratio_report_{config.broker_symbol}.md"
-        er_report_path.write_text(er_markdown, encoding="utf-8")
+        _write_report(er_report_path, er_markdown, provenance)
         print(f"  -> ER report built in {time.monotonic() - _t_er:.1f}s", flush=True)
 
     markov_report_path: Path | None = None
@@ -614,7 +697,7 @@ def main() -> None:
             pullback_duration_cuts=markov_duration_cuts,
         )
         markov_report_path = REPORTS_DIR / f"markov_report_{config.broker_symbol}.md"
-        markov_report_path.write_text(markov_markdown, encoding="utf-8")
+        _write_report(markov_report_path, markov_markdown, provenance)
         print(f"  -> Markov report built in {time.monotonic() - _t_markov:.1f}s", flush=True)
 
     hmm_report_path: Path | None = None
@@ -674,7 +757,7 @@ def main() -> None:
                 hmm_markdown = render_hmm_report_markdown(hmm_validation)
                 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
                 hmm_report_path = REPORTS_DIR / f"hmm_report_{config.broker_symbol}.md"
-                hmm_report_path.write_text(hmm_markdown, encoding="utf-8")
+                _write_report(hmm_report_path, hmm_markdown, provenance)
 
             if phase_report:
                 displacement_state = None
@@ -706,7 +789,7 @@ def main() -> None:
                 phase_markdown = render_phase_agreement_markdown(phase_agreement)
                 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
                 phase_report_path = REPORTS_DIR / f"phase_agreement_{config.broker_symbol}.md"
-                phase_report_path.write_text(phase_markdown, encoding="utf-8")
+                _write_report(phase_report_path, phase_markdown, provenance)
 
             print(f"  -> HMM/phase work built in {time.monotonic() - _t_hmm:.1f}s", flush=True)
 
