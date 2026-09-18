@@ -110,7 +110,7 @@ from vo.research.statistics import (
     mann_whitney_u,
 )
 from vo.research.transitions import nearest_sample_before
-from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (5, 10, 20, 40)
 DEFAULT_PRIMARY_WINDOW = 10  # matches config/settings/regime.yaml's efficiency_ratio_period default
@@ -303,6 +303,22 @@ def build_er_by_session(
     return tuple(describe(values, label) for label, values in grouped.items() if values)
 
 
+# ── 4b. ER by RTH vs non-RTH (added 2026-09-18, at the user's request) ────
+
+
+def build_er_by_rth(
+    samples: Sequence[tuple[datetime, float]], session_config: SessionConfig
+) -> tuple[GroupStats, ...]:
+    """Same telemetry-only posture as build_er_by_session -- see
+    vo.research.hurst_report.build_hurst_by_rth's docstring, identical
+    reasoning, ER instead of Hurst."""
+    grouped: dict[str, list[float]] = {"RTH": [], "NON_RTH": []}
+    for when, value in samples:
+        label = "RTH" if is_rth(when.astimezone(session_config.zone), session_config) else "NON_RTH"
+        grouped[label].append(value)
+    return tuple(describe(values, label) for label, values in grouped.items() if values)
+
+
 # ── 5. out-of-sample stability is vo.research.statistics.build_out_of_
 # sample_report -- fully generic, reused as-is (see this module's own
 # REUSE, NOT REIMPLEMENTATION note). No local wrapper here.
@@ -332,7 +348,8 @@ def render_er_report_markdown(
     by_regime: ERByRegime,
     transitions: TransitionERReport,
     by_session: Sequence[GroupStats],
-    out_of_sample: Sequence[OutOfSampleRow],
+    by_rth: Sequence[GroupStats] = (),
+    out_of_sample: Sequence[OutOfSampleRow] = (),
 ) -> str:
     lines: list[str] = []
     lines.append(
@@ -462,6 +479,26 @@ def render_er_report_markdown(
             f"{_fmt(s.stdev)} | {_fmt(s.p25)} | {_fmt(s.p75)} |"
         )
     lines.append("")
+
+    # 4b. by RTH vs non-RTH
+    if by_rth:
+        lines.append("## 4b. Efficiency Ratio by RTH vs non-RTH")
+        lines.append("")
+        lines.append(
+            "Same telemetry-only posture as section 4 -- a coarser, binary cut "
+            "across the same samples (RTH per config/settings/sessions.yaml, "
+            "vo-time-engine.md §4), not a replacement for the four-way session "
+            "breakdown above."
+        )
+        lines.append("")
+        lines.append("| Bucket | n | Mean | Median | Stdev | P25 | P75 |")
+        lines.append("|---|--:|--:|--:|--:|--:|--:|")
+        for s in by_rth:
+            lines.append(
+                f"| {s.label} | {s.n} | {_fmt(s.mean)} | {_fmt(s.median)} | "
+                f"{_fmt(s.stdev)} | {_fmt(s.p25)} | {_fmt(s.p75)} |"
+            )
+        lines.append("")
 
     # 5. out-of-sample
     lines.append("## 5. Out-of-sample stability")

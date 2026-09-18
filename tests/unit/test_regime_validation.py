@@ -7,7 +7,7 @@ numeric examples."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
@@ -415,6 +415,51 @@ def test_build_accuracy_validation_by_session(monkeypatch: pytest.MonkeyPatch) -
     assert by_session["MORNING"].matched == 1
     assert by_session["AFTERNOON"].n == 1
     assert by_session["AFTERNOON"].matched == 1
+
+
+def test_build_accuracy_validation_by_rth() -> None:
+    """2026-09-18, at the user's request -- same pattern as
+    test_build_accuracy_validation_by_session above, but a narrower RTH
+    window (09:00-17:00) than _session_config()'s own (which spans the
+    whole day), so RTH vs NON_RTH is actually exercised."""
+    rth_config = SessionConfig(
+        instrument_symbol="TEST",
+        timezone="UTC",
+        trading_day_opens=time(0, 0),
+        sessions=(SessionWindow(name="ALL_DAY", start=time(0, 0), end=time(23, 59, 59)),),
+        rth=SessionWindow(name="RTH", start=time(9, 0), end=time(17, 0)),
+    )
+    pb_rth = _state(
+        RegimeType.PULLBACK_UNRESOLVED,
+        datetime(2023, 1, 1, 10, 0, tzinfo=UTC),
+        anticipated=AnticipatedResolution.RETRACEMENT,
+    )
+    pb_non_rth = _state(
+        RegimeType.PULLBACK_UNRESOLVED,
+        datetime(2023, 1, 1, 20, 0, tzinfo=UTC),
+        anticipated=AnticipatedResolution.REVERSAL,
+        suffix="b",
+    )
+    states = (
+        pb_rth,
+        _state(
+            RegimeType.RETRACEMENT,
+            datetime(2023, 1, 1, 10, 1, tzinfo=UTC),
+            supersedes=pb_rth.object_id,
+        ),
+        pb_non_rth,
+        _state(
+            RegimeType.REVERSAL,
+            datetime(2023, 1, 1, 20, 1, tzinfo=UTC),
+            supersedes=pb_non_rth.object_id,
+        ),
+    )
+    accuracy = build_accuracy_validation(states, session_config=rth_config)
+    by_rth = {s.label: s for s in accuracy.by_rth}
+    assert by_rth["RTH"].n == 1
+    assert by_rth["RTH"].matched == 1
+    assert by_rth["NON_RTH"].n == 1
+    assert by_rth["NON_RTH"].matched == 1
 
 
 # ── markdown rendering (smoke) ────────────────────────────────────────────

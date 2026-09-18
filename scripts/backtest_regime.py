@@ -85,6 +85,7 @@ from vo.research.efficiency_ratio_report import (  # noqa: E402
 )
 from vo.research.efficiency_ratio_report import (  # noqa: E402
     build_er_by_regime_report,
+    build_er_by_rth,
     build_er_by_session,
     build_rolling_er,
     build_transition_er_report,
@@ -94,6 +95,7 @@ from vo.research.hurst_report import (  # noqa: E402
     DEFAULT_STRIDE,
     DEFAULT_WINDOW_LENGTHS,
     build_hurst_by_regime_report,
+    build_hurst_by_rth,
     build_hurst_by_session,
     build_rolling_hurst,
     build_transition_hurst_report,
@@ -101,6 +103,7 @@ from vo.research.hurst_report import (  # noqa: E402
 )
 from vo.research.markov_report import (  # noqa: E402
     build_preceding_pullback_duration_matrices,
+    build_rth_matrices,
     build_session_matrices,
     build_value_bucket_matrices,
     render_markov_report_markdown,
@@ -401,6 +404,11 @@ def main() -> None:
             if session_config is not None
             else ()
         )
+        by_rth = (
+            build_hurst_by_rth(rolling.get(regime_config.hurst_period, []), session_config)
+            if session_config is not None
+            else ()
+        )
         out_of_sample = build_out_of_sample_report(rolling, window_lengths=hurst_window_lengths)
         hurst_markdown = render_hurst_report_markdown(
             instrument_key=config.broker_symbol,
@@ -412,6 +420,7 @@ def main() -> None:
             by_regime=by_regime,
             transitions=transitions,
             by_session=by_session,
+            by_rth=by_rth,
             out_of_sample=out_of_sample,
         )
         hurst_report_path = REPO_ROOT / f"hurst_report_{config.broker_symbol}.md"
@@ -452,6 +461,13 @@ def main() -> None:
             if session_config is not None
             else ()
         )
+        er_by_rth = (
+            build_er_by_rth(
+                er_rolling.get(regime_config.efficiency_ratio_period, []), session_config
+            )
+            if session_config is not None
+            else ()
+        )
         er_out_of_sample = build_out_of_sample_report(er_rolling, window_lengths=er_window_lengths)
         er_markdown = render_er_report_markdown(
             instrument_key=config.broker_symbol,
@@ -463,6 +479,7 @@ def main() -> None:
             by_regime=er_by_regime,
             transitions=er_transitions,
             by_session=er_by_session,
+            by_rth=er_by_rth,
             out_of_sample=er_out_of_sample,
         )
         er_report_path = REPO_ROOT / f"efficiency_ratio_report_{config.broker_symbol}.md"
@@ -489,6 +506,11 @@ def main() -> None:
             if session_config is not None
             else {}
         )
+        markov_by_rth = (
+            build_rth_matrices(transitions_log, session_config)
+            if session_config is not None
+            else {}
+        )
         markov_by_hurst, markov_hurst_cuts = build_value_bucket_matrices(
             transitions_log,
             markov_hurst_rolling.get(markov_hurst_window, []),
@@ -506,6 +528,7 @@ def main() -> None:
             generated_utc=datetime.now(UTC),
             baseline=markov_baseline,
             by_session=markov_by_session,
+            by_rth=markov_by_rth,
             by_hurst=markov_by_hurst,
             hurst_cuts=markov_hurst_cuts,
             hurst_window=markov_hurst_window,

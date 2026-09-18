@@ -105,7 +105,7 @@ from vo.research.statistics import (
     mann_whitney_u,
 )
 from vo.research.transitions import nearest_sample_before
-from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (10, 20, 40, 80)
 DEFAULT_PRIMARY_WINDOW = 20  # matches config/settings/regime.yaml's hurst_period default
@@ -297,6 +297,25 @@ def build_hurst_by_session(
     return tuple(describe(values, label) for label, values in grouped.items() if values)
 
 
+# ── 4b. Hurst by RTH vs non-RTH (added 2026-09-18, at the user's request) ──
+
+
+def build_hurst_by_rth(
+    samples: Sequence[tuple[datetime, float]], session_config: SessionConfig
+) -> tuple[GroupStats, ...]:
+    """Same telemetry-only posture as build_hurst_by_session (RTH is a
+    fact about the instrument's own trading hours, per
+    vo-time-engine.md §4 -- this never feeds the classifier). A coarser,
+    binary cut across the same samples the four-way session breakdown
+    already covers -- not a replacement for it, a different lens on the
+    same data."""
+    grouped: dict[str, list[float]] = {"RTH": [], "NON_RTH": []}
+    for when, value in samples:
+        label = "RTH" if is_rth(when.astimezone(session_config.zone), session_config) else "NON_RTH"
+        grouped[label].append(value)
+    return tuple(describe(values, label) for label, values in grouped.items() if values)
+
+
 # ── 5. out-of-sample stability ───────────────────────────────────────────
 
 
@@ -324,7 +343,8 @@ def render_hurst_report_markdown(
     by_regime: HurstByRegime,
     transitions: TransitionHurstReport,
     by_session: Sequence[GroupStats],
-    out_of_sample: Sequence[OutOfSampleRow],
+    by_rth: Sequence[GroupStats] = (),
+    out_of_sample: Sequence[OutOfSampleRow] = (),
 ) -> str:
     lines: list[str] = []
     lines.append(
@@ -452,6 +472,26 @@ def render_hurst_report_markdown(
             f"{_fmt(s.stdev)} | {_fmt(s.p25)} | {_fmt(s.p75)} |"
         )
     lines.append("")
+
+    # 4b. by RTH vs non-RTH
+    if by_rth:
+        lines.append("## 4b. Hurst by RTH vs non-RTH")
+        lines.append("")
+        lines.append(
+            "Same telemetry-only posture as section 4 -- a coarser, binary cut "
+            "across the same samples (RTH per config/settings/sessions.yaml, "
+            "vo-time-engine.md §4), not a replacement for the four-way session "
+            "breakdown above."
+        )
+        lines.append("")
+        lines.append("| Bucket | n | Mean | Median | Stdev | P25 | P75 |")
+        lines.append("|---|--:|--:|--:|--:|--:|--:|")
+        for s in by_rth:
+            lines.append(
+                f"| {s.label} | {s.n} | {_fmt(s.mean)} | {_fmt(s.median)} | "
+                f"{_fmt(s.stdev)} | {_fmt(s.p25)} | {_fmt(s.p75)} |"
+            )
+        lines.append("")
 
     # 5. out-of-sample
     lines.append("## 5. Out-of-sample stability")

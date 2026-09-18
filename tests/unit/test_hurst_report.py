@@ -20,6 +20,7 @@ from vo.observation.regime import OBJECT_TYPE_REGIME_TRANSITION, RegimeTransitio
 from vo.research.hurst_report import (
     build_hurst_by_regime,
     build_hurst_by_regime_report,
+    build_hurst_by_rth,
     build_hurst_by_session,
     build_hurst_preceding_transitions,
     build_rolling_hurst,
@@ -243,6 +244,31 @@ def test_build_hurst_by_session_buckets_including_off_session() -> None:
     assert labels["MORNING"].n == 1
     assert labels["EVENING"].n == 1
     assert labels[OFF_SESSION_LABEL].n == 1
+
+
+def test_build_hurst_by_rth_splits_rth_from_non_rth() -> None:
+    """2026-09-18, at the user's request. A distinct, narrower RTH window
+    than _session_config()'s own (which spans the whole day and would
+    make every sample trivially RTH) -- 09:00-17:00, so the split is
+    actually exercised."""
+    config = SessionConfig(
+        instrument_symbol="TEST",
+        timezone="UTC",
+        trading_day_opens=time(0, 0),
+        sessions=(SessionWindow(name="ALL_DAY", start=time(0, 0), end=time(23, 59, 59)),),
+        rth=SessionWindow(name="RTH", start=time(9, 0), end=time(17, 0)),
+    )
+    samples = [
+        (_at(60 * 10), 0.5),  # 10:00 UTC -- RTH
+        (_at(60 * 11), 0.55),  # 11:00 UTC -- RTH
+        (_at(60 * 20), 0.6),  # 20:00 UTC -- NON_RTH
+    ]
+
+    dists = build_hurst_by_rth(samples, config)
+
+    labels = {d.label: d for d in dists}
+    assert labels["RTH"].n == 2
+    assert labels["NON_RTH"].n == 1
 
 
 # ── out-of-sample ──────────────────────────────────────────────────────────

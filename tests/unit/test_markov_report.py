@@ -20,6 +20,7 @@ from vo.observation.regime import (
 )
 from vo.research.markov_report import (
     build_preceding_pullback_duration_matrices,
+    build_rth_matrices,
     build_session_matrices,
     build_value_bucket_matrices,
     render_markov_report_markdown,
@@ -118,6 +119,30 @@ def test_build_session_matrices_off_session_bucket() -> None:
     transitions = (_transition(RegimeType.CONSOLIDATION, RegimeType.EXPANSION, off_hours),)
     result = build_session_matrices(transitions, _session_config())
     assert "OFF_SESSION" in result
+
+
+def test_build_rth_matrices_buckets_transitions_by_rth() -> None:
+    """2026-09-18, at the user's request -- same pattern as the session
+    tests above, but a narrower RTH window (09:00-17:00) than
+    _session_config()'s own (which spans the whole day), so RTH vs
+    NON_RTH is actually exercised."""
+    config = SessionConfig(
+        instrument_symbol="TEST",
+        timezone="UTC",
+        trading_day_opens=time(0, 0),
+        sessions=(SessionWindow(name="ALL_DAY", start=time(0, 0), end=time(23, 59, 59)),),
+        rth=SessionWindow(name="RTH", start=time(9, 0), end=time(17, 0)),
+    )
+    rth_time = _at(60 * 10)  # 10:00 -> RTH
+    non_rth_time = _at(60 * 20)  # 20:00 -> NON_RTH
+    transitions = (
+        _transition(RegimeType.CONSOLIDATION, RegimeType.EXPANSION, rth_time),
+        _transition(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED, non_rth_time),
+    )
+    result = build_rth_matrices(transitions, config)
+    assert set(result) == {"RTH", "NON_RTH"}
+    assert result["RTH"].counts[(RegimeType.CONSOLIDATION, RegimeType.EXPANSION)] == 1
+    assert result["NON_RTH"].counts[(RegimeType.EXPANSION, RegimeType.PULLBACK_UNRESOLVED)] == 1
 
 
 # ── by value bucket (Hurst/ER, generic) ──────────────────────────────────

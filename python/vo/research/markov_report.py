@@ -98,7 +98,7 @@ from vo.research.transitions import (
     build_transition_matrix,
     nearest_sample_before,
 )
-from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 DEFAULT_MIN_CELL_N = 30
 
@@ -125,6 +125,26 @@ def build_session_matrices(
         label = window.name if window is not None else OFF_SESSION_LABEL
         buckets.setdefault(label, []).append(transition)
     return {label: build_transition_matrix(ts) for label, ts in sorted(buckets.items())}
+
+
+# ── 2b. by RTH vs non-RTH (added 2026-09-18, at the user's request) ──────
+
+
+def build_rth_matrices(
+    transitions_log: Sequence[RegimeTransition], session_config: SessionConfig
+) -> dict[str, TransitionMatrix]:
+    """Same telemetry-only posture as build_session_matrices -- a
+    coarser, binary cut across the same transitions the four-way
+    session breakdown already covers, not a replacement for it."""
+    buckets: dict[str, list[RegimeTransition]] = {"RTH": [], "NON_RTH": []}
+    for transition in transitions_log:
+        label = (
+            "RTH"
+            if is_rth(transition.observed_at.astimezone(session_config.zone), session_config)
+            else "NON_RTH"
+        )
+        buckets[label].append(transition)
+    return {label: build_transition_matrix(ts) for label, ts in buckets.items() if ts}
 
 
 # ── 3/4. by Hurst or ER tercile bucket ───────────────────────────────────
@@ -323,6 +343,7 @@ def render_markov_report_markdown(
     er_window: int,
     by_pullback_duration: dict[str, TransitionMatrix],
     pullback_duration_cuts: tuple[float, float, float] | None,
+    by_rth: dict[str, TransitionMatrix] | None = None,
     min_cell_n: int = DEFAULT_MIN_CELL_N,
 ) -> str:
     lines: list[str] = []
@@ -384,6 +405,18 @@ def render_markov_report_markdown(
     lines.append("")
     _render_bucketed_section(lines, by_session, min_cell_n=min_cell_n)
 
+    # 2b. by RTH vs non-RTH
+    if by_rth:
+        lines.append("## 2b. Conditioned by RTH vs non-RTH")
+        lines.append("")
+        lines.append(
+            "Same telemetry-only posture as section 2 -- a coarser, binary cut "
+            "across the same transitions, not a replacement for the four-way "
+            "session breakdown above."
+        )
+        lines.append("")
+        _render_bucketed_section(lines, by_rth, min_cell_n=min_cell_n)
+
     # 3. by Hurst
     lines.append(f"## 3. Conditioned by Hurst (tercile, window={hurst_window})")
     lines.append("")
@@ -426,7 +459,8 @@ def render_markov_report_markdown(
     for section_name, matrices in (
         ("Baseline", {"baseline": baseline}),
         ("By session", by_session),
-        ("By Hurst", by_hurst),
+        ("By RTH", by_rth or {}),
+        ("By Hurst", by_hurst or {}),
         ("By ER", by_er),
         ("By pullback duration", by_pullback_duration),
     ):

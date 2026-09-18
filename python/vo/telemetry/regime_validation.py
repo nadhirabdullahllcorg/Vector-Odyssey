@@ -85,7 +85,7 @@ from vo.research.statistics import (
 from vo.research.transitions import TransitionMatrix
 from vo.telemetry.regime_feed import RegimeSegment
 from vo.telemetry.regime_report import RegimeReport, build_regime_report
-from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, session_at
+from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 _ER_FEATURE = "efficiency_ratio"
 _HURST_FEATURE = "hurst_exponent"
@@ -325,6 +325,7 @@ class AccuracyValidation:
     vs_majority_baseline: BinomialTest | None
     wilson_ci: tuple[float, float] | None
     by_session: tuple[AccuracySlice, ...]
+    by_rth: tuple[AccuracySlice, ...]
     by_confidence_quartile: tuple[AccuracySlice, ...]
     by_pullback_duration_quartile: tuple[AccuracySlice, ...]
 
@@ -373,6 +374,7 @@ def build_accuracy_validation(
     leaned = 0
     matched = 0
     session_hits: dict[str, list[bool]] = {}
+    rth_hits: dict[str, list[bool]] = {}
     confidence_values: list[float] = []
     duration_values: list[float] = []
     leaned_records: list[tuple[RegimeState, RegimeState, bool]] = []  # (resolution, prior, matched)
@@ -402,6 +404,12 @@ def build_accuracy_validation(
             window = session_at(state.observed_at.astimezone(session_config.zone), session_config)
             session_name = window.name if window is not None else OFF_SESSION_LABEL
             session_hits.setdefault(session_name, []).append(is_match)
+            rth_label = (
+                "RTH"
+                if is_rth(state.observed_at.astimezone(session_config.zone), session_config)
+                else "NON_RTH"
+            )
+            rth_hits.setdefault(rth_label, []).append(is_match)
 
         confidence_values.append(prior.confidence)  # type: ignore[union-attr]
         origin = _pullback_origin(prior)  # type: ignore[arg-type]
@@ -435,6 +443,16 @@ def build_accuracy_validation(
         for name, hits in sorted(session_hits.items())
     )
 
+    by_rth = tuple(
+        AccuracySlice(
+            label=name,
+            n=len(hits),
+            matched=sum(hits),
+            rate=(sum(hits) / len(hits)) if hits else None,
+        )
+        for name, hits in sorted(rth_hits.items())
+    )
+
     confidence_pairs = zip(leaned_records, confidence_values, strict=True)
     by_confidence_quartile = _quartile_slices(
         [(conf, is_match) for (_s, _p, is_match), conf in confidence_pairs]
@@ -457,6 +475,7 @@ def build_accuracy_validation(
         vs_majority_baseline=vs_majority,
         wilson_ci=wilson,
         by_session=by_session,
+        by_rth=by_rth,
         by_confidence_quartile=by_confidence_quartile,
         by_pullback_duration_quartile=by_duration_quartile,
     )
@@ -727,6 +746,7 @@ def render_validation_report_markdown(
 
     for title, slices in (
         ("By session", a.by_session),
+        ("By RTH", a.by_rth),
         ("By pullback confidence (quartile)", a.by_confidence_quartile),
         ("By pullback duration before resolution (quartile)", a.by_pullback_duration_quartile),
     ):
