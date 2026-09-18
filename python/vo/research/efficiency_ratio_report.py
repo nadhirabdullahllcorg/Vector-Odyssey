@@ -113,7 +113,7 @@ from vo.research.transitions import nearest_sample_before
 from vo.time.sessions import OFF_SESSION_LABEL, SessionConfig, is_rth, session_at
 
 DEFAULT_WINDOW_LENGTHS: tuple[int, ...] = (5, 10, 20, 40)
-DEFAULT_PRIMARY_WINDOW = 10  # matches config/settings/regime.yaml's efficiency_ratio_period default
+DEFAULT_PRIMARY_WINDOW = 14  # matches regime.yaml's efficiency_ratio_period default (v3)
 DEFAULT_STRIDE = 30
 
 _ALL_REGIMES: tuple[RegimeType, ...] = tuple(RegimeType)

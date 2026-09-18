@@ -22,12 +22,26 @@
 # trusted again. build_regime_engine() (regime_config.py) now defaults
 # methodology_version from this field -- previously it silently ignored
 # it and always stamped a bare 1, a latent gap fixed the same day.
-version: 2
+version: 3
+
+# v3 (2026-09-18): efficiency_ratio_period bumped 10 -> 14 bars. Confirmed the
+# same day via a user-supplied quant-trading reference (Kaufman ER/ATR/Hurst/
+# HMM "dual system" framework, folded into vo-trade-logic-and-brain-plan.md
+# Sec 5.7's 2026-09-18 revision -- Markov/Hurst/ATR/ER move from
+# secondary/entry-timing-only to co-equal Phase 32 stack components, still
+# back-tested before trusted per G2). 14 bars is the standard Wilder lookback
+# the reference cites for ER/ATR on an execution timeframe (M1/M5) -- a
+# config-value bump only, not a classifier behavior change, so no
+# re-validation of the frozen 1,000,000-bar CONSOLIDATION/EXPANSION baseline
+# is required the way v2's body-boundary change required one. hurst_period
+# stays at 20 this round -- the reference's 100-200 bar direction is recorded
+# in the plan doc but NOT applied here, since it would invalidate the same
+# frozen baseline and needs its own explicit go-ahead first.
 
 # Which swing tier is the structural backbone: SWING (larger) or INTERNAL.
 tier: SWING
 
-efficiency_ratio_period: 10   # bars; Kaufman ER window (vo.observation.efficiency_ratio)
+efficiency_ratio_period: 14   # bars; Kaufman ER window (vo.observation.efficiency_ratio) -- v3
 hurst_period: 20              # bars; structure-function Hurst window (vo.observation.hurst)
 
 # [VO-H] anticipation lean thresholds (only affect the recorded lean on a
