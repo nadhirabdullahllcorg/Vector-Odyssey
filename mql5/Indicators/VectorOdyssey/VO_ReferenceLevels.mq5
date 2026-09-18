@@ -295,6 +295,12 @@ int g_settlement_min;
 datetime g_last_seen_m1_open = 0;
 datetime g_last_cleanup_trading_day = 0;
 datetime g_last_seen_bar_open = 0;
+// The most recent M1 bar time seen by the last VO_RescanAndDraw pass --
+// every reference-level ray's TEXT label (never the ray itself, which
+// stays anchored at its own dated origin) is repositioned here each
+// rescan, so the label always reads near the chart's live/right edge
+// instead of buried at the ray's left-hand origin.
+datetime g_live_edge_time = 0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -376,6 +382,10 @@ void VO_RescanAndDraw()
    const int copied = CopyRates(_Symbol, PERIOD_M1, 0, InpMaxM1BarsToScan, rates);
    if(copied <= 1)
       return; // not enough M1 history loaded yet - nothing to draw
+
+   // Every level label drawn this pass reads its x-position from here,
+   // so all of them - even a PDH from days ago - track the live edge.
+   g_live_edge_time = rates[copied - 1].time;
 
    // ---- Pass 1: classify every bar (NY-naive time, for grouping only -
    // object anchors below use the bar's own native chart time, never
@@ -728,7 +738,11 @@ void VO_DrawMonthlyLevels(const MqlRates &rates[], const int &day_start[], const
 //| extends forward indefinitely - idempotent: if the named objects   |
 //| already exist (a re-scan of an unchanged historical day), their   |
 //| price/time/text are simply reset to the same values, never        |
-//| duplicated.                                                       |
+//| duplicated. The RAY's own anchor stays at anchor_time (where the  |
+//| level was measured, never moved) - only the TEXT label's x-      |
+//| position tracks g_live_edge_time, right-anchored, so the label   |
+//| always reads near the chart's live/right edge rather than        |
+//| sitting at the ray's dated origin on the left.                   |
 //+------------------------------------------------------------------+
 void VO_DrawLevel(const string name, const datetime anchor_time, const double price,
                   const string label_text, const color clr)
@@ -751,16 +765,21 @@ void VO_DrawLevel(const string name, const datetime anchor_time, const double pr
    ObjectSetInteger(0, name, OBJPROP_WIDTH, InpLineWidth);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, label_text + StringFormat(": %s", DoubleToString(price, _Digits)));
 
+   // The label's x-position is g_live_edge_time, not anchor_time - see
+   // this function's own header comment. Falls back to anchor_time only
+   // on the (should-never-happen) first call before any rescan has run.
+   const datetime label_time = (g_live_edge_time > 0) ? g_live_edge_time : anchor_time;
+
    const string label_name = name + "|lbl";
    if(ObjectFind(0, label_name) < 0)
      {
-      ObjectCreate(0, label_name, OBJ_TEXT, 0, anchor_time, price);
+      ObjectCreate(0, label_name, OBJ_TEXT, 0, label_time, price);
       ObjectSetInteger(0, label_name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, label_name, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_RIGHT_LOWER);
       ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, InpFontSize);
      }
-   ObjectSetInteger(0, label_name, OBJPROP_TIME, 0, anchor_time);
+   ObjectSetInteger(0, label_name, OBJPROP_TIME, 0, label_time);
    ObjectSetDouble(0, label_name, OBJPROP_PRICE, 0, price);
    ObjectSetString(0, label_name, OBJPROP_TEXT, label_text);
    ObjectSetInteger(0, label_name, OBJPROP_COLOR, clr);
