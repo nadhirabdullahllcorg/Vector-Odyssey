@@ -2,14 +2,28 @@
 VOEaRuntime -- the layer-7 glue that turns vo.core's ObservationPipeline
 into a stream of RuntimeState updates and publishes them.
 
-Layering note: vo.telemetry is layer 7, the top of the stack, and its own
+Layering note: vo.telemetry is layer 11, the top of the stack, and its own
 module docstring (state.py) says it is "allowed to import all of
-them [the other layers]" -- vo.core (layer 6) may never import
+them [the other layers]" -- vo.core (layer 9) may never import
 vo.telemetry back (tests/unit/test_architecture.py's
 test_modules_do_not_import_higher_layers forbids it), so the wiring that
 needs both a running pipeline and a RuntimeState has to live up here, not
 in vo.core. vo.core.pipeline.PipelineSnapshot itself carries no
 telemetry dependency; only this module turns one into a RuntimeState.
+
+Phase 14/16 wiring note: VOEaRuntime optionally accepts a
+TradeEvaluationHooks (vo.telemetry.trade_pipeline) via the `trade_hooks`
+constructor argument. When unset (the default, and the only mode any
+production config exercises today), poll_once() behaves exactly as it
+did before this note was written -- no pipeline evaluation, no signal,
+no trade. When a caller does attach hooks (a test, or Phase 18's real
+strategy), poll_once() runs the Signal/AllocationSignal/RiskCheck/
+TradeSignal pipeline after every snapshot that produced new data and
+records the result on self.last_pipeline_result. This module does NOT
+send anything to a broker: no vo.execution call is made here, by
+design. A produced TradeSignal is logged and kept, never dispatched --
+that wiring is Phase 18's, and is deliberately absent so "no live
+orders" remains true by omission, not by a flag someone could miss.
 """
 
 from __future__ import annotations
@@ -23,6 +37,11 @@ from vo.core.pipeline import ObservationPipeline, PipelineSnapshot
 from vo.market.ingestion import JsonlTailer
 from vo.telemetry.publisher import RuntimeStatePublisher
 from vo.telemetry.state import CURRENT_SCHEMA_VERSION, ConnectionStatus, RuntimeState
+from vo.telemetry.trade_pipeline import (
+    TradeEvaluationHooks,
+    TradePipelineResult,
+    evaluate_trade_pipeline,
+)
 from vo.time.brokers import BrokerProfile, load_broker_profiles
 from vo.time.sessions import SessionConfig, load_session_configs
 
@@ -77,6 +96,7 @@ class VOEaRuntime:
         broker_profiles: dict[str, BrokerProfile],
         session_configs: dict[str, SessionConfig],
         publisher: RuntimeStatePublisher | None = None,
+        trade_hooks: TradeEvaluationHooks | None = None,
     ) -> None:
         self.config = config
         self.pipeline = ObservationPipeline(broker_profiles, session_configs)
@@ -87,6 +107,12 @@ class VOEaRuntime:
         self._tick_tailer = JsonlTailer(config.tick_wire_path())
         self._meta_tailer = JsonlTailer(config.meta_wire_path())
         self._running = False
+        # Optional, unset by default. See the module docstring's "Phase
+        # 14/16 wiring note" -- attaching hooks is what a test, or Phase
+        # 18's real strategy, does; nothing in this module attaches them
+        # on its own.
+        self.trade_hooks = trade_hooks
+        self.last_pipeline_result: TradePipelineResult | None = None
 
     def _poll_tailer(self, tailer: JsonlTailer) -> int:
         result = tailer.poll()
@@ -115,6 +141,26 @@ class VOEaRuntime:
             )
             await self.publisher.publish(state)
             logger.info("published RuntimeState: %s", state.detail)
+
+            if self.trade_hooks is not None:
+                result = evaluate_trade_pipeline(
+                    snapshot, self.trade_hooks, symbol=self.pipeline.latest_symbol
+                )
+                self.last_pipeline_result = result
+                if result is not None and result.trade_signal is not None:
+                    logger.info(
+                        "TradeSignal produced (%s): no execution adapter is "
+                        "wired to consume it -- Phase 18's job, not this "
+                        "poll loop's",
+                        result.trade_signal.object_id,
+                    )
+                elif result is not None and result.signal is not None:
+                    logger.info(
+                        "trade pipeline evaluated, no TradeSignal (signal=%s "
+                        "decision=%s)",
+                        result.signal.object_id,
+                        result.signal.decision,
+                    )
 
         return new_count
 

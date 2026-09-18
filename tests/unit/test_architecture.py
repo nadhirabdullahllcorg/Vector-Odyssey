@@ -43,7 +43,8 @@ LAYERS: dict[str, int] = {
     "vo.allocation": 7,
     "vo.risk": 8,
     "vo.core": 9,
-    "vo.telemetry": 10,
+    "vo.execution": 10,
+    "vo.telemetry": 11,
 }
 
 # Only this module may talk to the terminal.
@@ -438,6 +439,13 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.risk",
         "vo.risk.risk_config",
         "vo.risk.manager",
+        "vo.core.mt5",
+        "vo.execution",
+        "vo.execution.execution_config",
+        "vo.execution.types",
+        "vo.execution.router",
+        "vo.execution.reconciliation",
+        "vo.telemetry.trade_pipeline",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:

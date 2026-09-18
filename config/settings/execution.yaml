@@ -1,0 +1,21 @@
+# Phase 16's ExecutionConfig -- config/settings/execution.yaml
+#
+# Versioned, not hardcoded (matches risk.yaml/swings.yaml/regime.yaml's
+# own convention: an operational starting point, expected to be revised,
+# not a settled constant).
+#
+# magic_number / comment_prefix exist so vo.execution.reconciliation can
+# tell "did VO open this position" apart from a manual or pre-existing
+# one on restart -- see architecture/vo-phase-plan.md's Phase 16 gate
+# ("unexpected pre-existing position detected, not ignored") and SS16-notes.
+#
+# deviation_points is the price-deviation tolerance (in points) passed to
+# MT5's order_send -- how far the actual fill price may move from the
+# requested price before MT5 rejects with a REQUOTE. No prior doc named a
+# value; 20 points is a conservative, commonly-used starting figure for a
+# liquid index CFD, explicitly not validated against this account's real
+# spread/slippage behavior yet.
+version: 1
+magic_number: 20260914
+comment_prefix: "VO"
+deviation_points: 20
