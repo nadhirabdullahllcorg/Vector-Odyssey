@@ -3,7 +3,8 @@
 Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
     python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] \
-        [--validate] [--hurst-report] [--er-report] [--markov-report]
+        [--validate] [--hurst-report] [--er-report] [--markov-report] \
+        [--hmm-report] [--phase-report]
 
 --validate additionally builds a Regime Engine Validation Report v1
 (vo.telemetry.regime_validation) from the SAME in-memory replay -- no
@@ -56,6 +57,29 @@ structure from more confirmed swings, so the classification at the right
 edge is better-founded, not just longer. No new classification logic --
 same engine, same gates (G2: the feed and report are viz/analysis, never
 a decision path).
+
+--hmm-report additionally builds Phase 17a's IHMMEngine validation
+report (vo.research.hmm_report) -- a Gaussian HMM trained on
+[return/ATR, rolling Efficiency Ratio], restricted to the NY_AM
+killzone window (08:30-11:30 ET, vo.research.hmm_report's own
+KILLZONE_NY_AM_START/END -- deliberately NOT sessions.yaml's NY_AM, see
+that module's docstring) -- and writes hmm_report_<symbol>.md. Requires
+the optional [hmm] extra (hmmlearn); if it is not installed, this flag
+prints a clear message and is skipped, the rest of the run is
+unaffected. [VO-H] research output -- never a decision path (G2/Sec 5.6).
+
+--phase-report additionally builds a VALIDATION-ONLY agreement study
+(vo.research.phase_agreement) comparing a pure Hurst+ER+HMM statistical
+4-phase guess against Phase 13's REAL classification on the same bars --
+confirmed 2026-09-18: validation study only, never a standalone
+classifier, never a decision path. Implies the same HMM training
+--hmm-report does (reuses it if both flags are passed, trains it fresh
+if --phase-report is passed alone) and writes
+phase_agreement_<symbol>.md. Same optional-dependency handling as
+--hmm-report.
+
+All report files are written under reports/backtests/, not the repo
+root -- see REPORTS_DIR below.
 """
 
 from __future__ import annotations
@@ -77,6 +101,7 @@ from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
+from vo.research.atr_series import build_rolling_atr  # noqa: E402
 from vo.research.efficiency_ratio_report import (  # noqa: E402
     DEFAULT_STRIDE as ER_DEFAULT_STRIDE,
 )
@@ -90,6 +115,15 @@ from vo.research.efficiency_ratio_report import (  # noqa: E402
     build_rolling_er,
     build_transition_er_report,
     render_er_report_markdown,
+)
+from vo.research.hmm_report import (  # noqa: E402
+    KILLZONE_NY_AM_END,
+    KILLZONE_NY_AM_START,
+    build_hmm_validation_report,
+    build_killzone_samples,
+    build_state_profiles,
+    render_hmm_report_markdown,
+    train_hmm,
 )
 from vo.research.hurst_report import (  # noqa: E402
     DEFAULT_STRIDE,
@@ -107,6 +141,11 @@ from vo.research.markov_report import (  # noqa: E402
     build_session_matrices,
     build_value_bucket_matrices,
     render_markov_report_markdown,
+)
+from vo.research.phase_agreement import (  # noqa: E402
+    build_phase_agreement_report,
+    build_phase_comparison_samples,
+    render_phase_agreement_markdown,
 )
 from vo.research.regime_windows import RegimeInterval  # noqa: E402
 from vo.research.statistics import (  # noqa: E402
@@ -137,6 +176,17 @@ from vo.time.sessions import load_session_configs  # noqa: E402
 
 SWINGS_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "swings.yaml"
 REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
+# All generated backtest/research reports land here, organized in one
+# place rather than scattered loose at the repo root -- confirmed
+# 2026-09-18, so past/future runs are easy to find for further testing.
+# Generated, regenerable output -- see .gitignore's "reports/" entry.
+REPORTS_DIR = REPO_ROOT / "reports" / "backtests"
+# [VO-D] -- ATR lookback for the HMM's own normalization input
+# (--hmm-report/--phase-report), per the user's supplied reference.
+# NOT yet promoted into regime.yaml (no atr_period field exists there
+# for this role) -- see vo-trade-logic-and-brain-plan.md Sec
+# 5.7-revision's own flag on this gap.
+HMM_ATR_PERIOD = 14
 # copy_rates_from_pos (vo.market.mt5.MT5ReadClient.copy_rates) returns
 # whatever the terminal actually has cached, up to this count -- asking
 # for more than exists is harmless (you get back what's available, not
@@ -147,13 +197,15 @@ REGIME_CONFIG_PATH = REPO_ROOT / "config" / "settings" / "regime.yaml"
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool]:
+def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
     validate = False
     hurst_report = False
     er_report = False
     markov_report = False
+    hmm_report = False
+    phase_report = False
     rest = []
     i = 0
     while i < len(argv):
@@ -172,12 +224,27 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool]:
         elif argv[i] == "--markov-report":
             markov_report = True
             i += 1
+        elif argv[i] == "--hmm-report":
+            hmm_report = True
+            i += 1
+        elif argv[i] == "--phase-report":
+            phase_report = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
     if rest:
         config_path = rest[0]
-    return config_path, bars, validate, hurst_report, er_report, markov_report
+    return (
+        config_path,
+        bars,
+        validate,
+        hurst_report,
+        er_report,
+        markov_report,
+        hmm_report,
+        phase_report,
+    )
 
 
 def _write_feed_atomic(out_path: Path, text: str) -> None:
@@ -195,9 +262,16 @@ def _write_feed_atomic(out_path: Path, text: str) -> None:
 
 
 def main() -> None:
-    config_path, bar_cap, validate, hurst_report, er_report, markov_report = _parse_args(
-        sys.argv[1:]
-    )
+    (
+        config_path,
+        bar_cap,
+        validate,
+        hurst_report,
+        er_report,
+        markov_report,
+        hmm_report,
+        phase_report,
+    ) = _parse_args(sys.argv[1:])
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
@@ -307,7 +381,8 @@ def main() -> None:
         session_config=session_config,
     )
     markdown = render_report_markdown(report)
-    report_path = REPO_ROOT / f"regime_backtest_{config.broker_symbol}.md"
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = REPORTS_DIR / f"regime_backtest_{config.broker_symbol}.md"
     report_path.write_text(markdown, encoding="utf-8")
 
     # 2. Full-history feed for VO_ReferenceLevels.mq5 (regime drawing moved
@@ -368,7 +443,7 @@ def main() -> None:
             evidence=evidence,
             accuracy=accuracy,
         )
-        validation_report_path = REPO_ROOT / f"regime_validation_{config.broker_symbol}.md"
+        validation_report_path = REPORTS_DIR / f"regime_validation_{config.broker_symbol}.md"
         validation_report_path.write_text(validation_markdown, encoding="utf-8")
         print(
             f"  -> validation report built in {time.monotonic() - _t_validate:.1f}s", flush=True
@@ -423,7 +498,7 @@ def main() -> None:
             by_rth=by_rth,
             out_of_sample=out_of_sample,
         )
-        hurst_report_path = REPO_ROOT / f"hurst_report_{config.broker_symbol}.md"
+        hurst_report_path = REPORTS_DIR / f"hurst_report_{config.broker_symbol}.md"
         hurst_report_path.write_text(hurst_markdown, encoding="utf-8")
         print(f"  -> Hurst report built in {time.monotonic() - _t_hurst:.1f}s", flush=True)
 
@@ -482,7 +557,7 @@ def main() -> None:
             by_rth=er_by_rth,
             out_of_sample=er_out_of_sample,
         )
-        er_report_path = REPO_ROOT / f"efficiency_ratio_report_{config.broker_symbol}.md"
+        er_report_path = REPORTS_DIR / f"efficiency_ratio_report_{config.broker_symbol}.md"
         er_report_path.write_text(er_markdown, encoding="utf-8")
         print(f"  -> ER report built in {time.monotonic() - _t_er:.1f}s", flush=True)
 
@@ -538,9 +613,102 @@ def main() -> None:
             by_pullback_duration=markov_by_duration,
             pullback_duration_cuts=markov_duration_cuts,
         )
-        markov_report_path = REPO_ROOT / f"markov_report_{config.broker_symbol}.md"
+        markov_report_path = REPORTS_DIR / f"markov_report_{config.broker_symbol}.md"
         markov_report_path.write_text(markov_markdown, encoding="utf-8")
         print(f"  -> Markov report built in {time.monotonic() - _t_markov:.1f}s", flush=True)
+
+    hmm_report_path: Path | None = None
+    phase_report_path: Path | None = None
+    hmm_skip_reason: str | None = None
+    if hmm_report or phase_report:
+        print("training Phase 17a IHMMEngine (Gaussian HMM, NY_AM killzone)...", flush=True)
+        _t_hmm = time.monotonic()
+        atr_rolling = build_rolling_atr(
+            sequence.bars, tick_size=symbol.tick_size, window_lengths=(HMM_ATR_PERIOD,)
+        )
+        hmm_er_rolling = build_rolling_er(
+            sequence.bars, window_lengths=(regime_config.efficiency_ratio_period,)
+        )
+        hmm_hurst_rolling = build_rolling_hurst(
+            sequence.bars, window_lengths=(regime_config.hurst_period,)
+        )
+        killzone_samples = build_killzone_samples(
+            sequence.bars,
+            atr_rolling.get(HMM_ATR_PERIOD, []),
+            hmm_er_rolling.get(regime_config.efficiency_ratio_period, []),
+            window_start=KILLZONE_NY_AM_START,
+            window_end=KILLZONE_NY_AM_END,
+        )
+        window_label = (
+            f"NY_AM killzone {KILLZONE_NY_AM_START:%H:%M}-{KILLZONE_NY_AM_END:%H:%M} "
+            f"America/New_York ({len(killzone_samples)} bars in window)"
+        )
+        try:
+            hmm_model, hmm_states = train_hmm(killzone_samples)
+        except RuntimeError as exc:
+            # hmmlearn not installed -- see hmm_report._hmmlearn()'s own
+            # message. Non-fatal: everything else this script produces is
+            # unaffected, same pattern as the feed-write PermissionError
+            # handling above.
+            hmm_skip_reason = str(exc)
+            print(f"  -> WARNING: skipping --hmm-report/--phase-report: {exc}", flush=True)
+        except ValueError as exc:
+            # Not enough killzone samples in this bar range/window -- an
+            # honest "cannot fit," not a crash.
+            hmm_skip_reason = str(exc)
+            print(f"  -> WARNING: skipping --hmm-report/--phase-report: {exc}", flush=True)
+        else:
+            hurst_series = hmm_hurst_rolling.get(regime_config.hurst_period, [])
+            profiles = build_state_profiles(killzone_samples, hmm_states, hurst_series)
+
+            if hmm_report:
+                hmm_validation = build_hmm_validation_report(
+                    instrument_key=config.broker_symbol,
+                    timeframe_canonical="M1",
+                    generated_utc=datetime.now(UTC),
+                    window_label=window_label,
+                    model=hmm_model,
+                    samples=killzone_samples,
+                    profiles=profiles,
+                )
+                hmm_markdown = render_hmm_report_markdown(hmm_validation)
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                hmm_report_path = REPORTS_DIR / f"hmm_report_{config.broker_symbol}.md"
+                hmm_report_path.write_text(hmm_markdown, encoding="utf-8")
+
+            if phase_report:
+                displacement_state = None
+                accumulation_state = None
+                if profiles:
+                    by_er = sorted(profiles, key=lambda p: p.mean_er)
+                    if len(by_er) >= 2 and by_er[0].mean_er < by_er[-1].mean_er:
+                        accumulation_state = by_er[0].state
+                        displacement_state = by_er[-1].state
+                phase_intervals = tuple(
+                    RegimeInterval(regime=seg.regime, start_utc=seg.start_utc, end_utc=seg.end_utc)
+                    for seg in segments
+                )
+                comparisons = build_phase_comparison_samples(
+                    phase_intervals,
+                    killzone_samples,
+                    hmm_states,
+                    hurst_series,
+                    displacement_state=displacement_state,
+                    accumulation_state=accumulation_state,
+                )
+                phase_agreement = build_phase_agreement_report(
+                    comparisons,
+                    instrument_key=config.broker_symbol,
+                    timeframe_canonical="M1",
+                    generated_utc=datetime.now(UTC),
+                    window_label=window_label,
+                )
+                phase_markdown = render_phase_agreement_markdown(phase_agreement)
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                phase_report_path = REPORTS_DIR / f"phase_agreement_{config.broker_symbol}.md"
+                phase_report_path.write_text(phase_markdown, encoding="utf-8")
+
+            print(f"  -> HMM/phase work built in {time.monotonic() - _t_hmm:.1f}s", flush=True)
 
     calendar_days = (history_end - sequence.bars[0].open_time_utc).total_seconds() / 86400.0
     trading_days = len(sequence) / 1440.0
@@ -571,6 +739,12 @@ def main() -> None:
         print(f"ER report written: {er_report_path}")
     if markov_report_path is not None:
         print(f"Markov report written: {markov_report_path}")
+    if hmm_report_path is not None:
+        print(f"HMM report written: {hmm_report_path}")
+    if phase_report_path is not None:
+        print(f"Phase agreement report written: {phase_report_path}")
+    if hmm_skip_reason is not None:
+        print(f"HMM/phase report(s) skipped: {hmm_skip_reason}")
     print()
     print(markdown)
 

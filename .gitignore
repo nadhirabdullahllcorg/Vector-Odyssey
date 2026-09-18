@@ -28,6 +28,24 @@ data/**
 logs/
 
 # ══════════════════════════════════════════════════════════════
+# GENERATED REPORTS -- backtest/research output and pytest run logs,
+# regenerable from code + data. Organized under one directory
+# (confirmed 2026-09-18) instead of loose files at the repo root, but
+# still never committed -- same category as data/ and logs/ above.
+# git note: directories must be un-ignored explicitly before a nested
+# file can be re-included (a bare `!reports/**/x` does not work once
+# `reports/**` has already excluded the directory tree itself).
+# ══════════════════════════════════════════════════════════════
+reports/*
+!reports/backtests/
+!reports/pytest/
+reports/backtests/*
+!reports/backtests/.gitkeep
+reports/pytest/*
+!reports/pytest/.gitkeep
+!reports/pytest/README.md
+
+# ══════════════════════════════════════════════════════════════
 # PYTHON
 # ══════════════════════════════════════════════════════════════
 __pycache__/
