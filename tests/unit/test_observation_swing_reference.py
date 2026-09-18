@@ -99,6 +99,7 @@ def _swing(*, swing_type: SwingType, price: float) -> SwingPoint:
         swing_type=swing_type,
         status=SwingStatus.CONFIRMED,
         price=price,
+        body_price=price,
         pivot_bar_id="pivot",
         confirmed_at_bar_id="confirm",
         reversal_ticks=1,

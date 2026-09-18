@@ -89,23 +89,34 @@ def build_regime_engine(
     swing_config: SwingConfig,
     *,
     tick_size: float,
-    methodology_version: int = 1,
+    methodology_version: int | None = None,
 ) -> RegimeEngine:
     """Wire a RegimeEngine from the two configs: a SwingEngine of the
     configured tier drives the structure, ER/Hurst windows and the
     anticipation thresholds come from regime.yaml. Lives here (not on
     RegimeEngine) so vo.observation.regime need not import its own config
-    loader -- avoids an import cycle."""
+    loader -- avoids an import cycle.
+
+    `methodology_version` defaults to `regime_config.version` (fixed
+    2026-09-18: this parameter used to silently default to a bare `1`
+    regardless of regime.yaml's own `version` field, so bumping that
+    field -- as the 2026-09-18 bodies-not-wicks boundary change does,
+    1 -> 2 -- never actually reached a stamped RegimeState. An explicit
+    override is still honored, for a caller that genuinely wants to pin
+    a different version than the config file's own.)"""
+    resolved_version = (
+        methodology_version if methodology_version is not None else regime_config.version
+    )
     swing_engine = SwingEngine.for_level(
         swing_config,
         regime_config.tier,
         tick_size=tick_size,
-        methodology_version=methodology_version,
+        methodology_version=resolved_version,
     )
     return RegimeEngine(
         swing_engine=swing_engine,
         efficiency_ratio_period=regime_config.efficiency_ratio_period,
         hurst_period=regime_config.hurst_period,
         anticipation=regime_config.anticipation,
-        methodology_version=methodology_version,
+        methodology_version=resolved_version,
     )

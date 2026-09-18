@@ -61,6 +61,20 @@ Composing the two into one combined stream, or wiring this into
 ObservationPipeline, is deliberately left to whichever later phase already
 owns that as a stated deliverable -- Phase 11's own row is the detector
 itself, not its integration.
+
+BODY_PRICE, ADDITIVE ONLY (added 2026-09-18): `SwingPoint.body_price`
+records each pivot bar's body extreme (max/min of open/close on the
+swing's own side) alongside the existing wick-based `price`. This does
+NOT change this module's own structural swing/break detection -- `price`
+(wick) remains what `_check_new_pivot`/`_check_breaks` key on, unchanged,
+because standard swing-point identification isn't itself specified as
+body-vs-wick anywhere in Month 1 and this is not the G6 review that
+would authorize touching it. `body_price` exists because Lesson 1 states
+directly that "the consolidation range... [is] defined specifically by
+the bodies of the candles not the wicks" -- a fact scoped to the
+CONSOLIDATION range, i.e. Phase 13's own boundary tracking, not Phase
+11's detector. See vo.observation.regime's module docstring for how
+RegimeEngine consumes it.
 """
 
 from __future__ import annotations
@@ -141,7 +155,22 @@ class SwingPoint(CanonicalRecord):
     swing_type: SwingType
     status: SwingStatus
     price: float
-    """The pivot's high (SwingType.HIGH) or low (SwingType.LOW)."""
+    """The pivot's high (SwingType.HIGH) or low (SwingType.LOW) -- the
+    WICK extreme. Structural swing/break detection (this engine's own
+    job) stays keyed on this field; it is intentionally unchanged."""
+    body_price: float
+    """The pivot bar's BODY extreme on the same side as `price`: the
+    higher of open/close for a HIGH swing, the lower of open/close for a
+    LOW swing. Added 2026-09-18, confirmed via G6 human review the same
+    day: Lesson 1 states, directly, that "the consolidation range... [is]
+    defined specifically by the bodies of the candles not the wicks."
+    `[ICT]` for the bodies-not-wicks fact itself; `[VO-D]` for using the
+    pivot bar's own body extreme as the boundary value a downstream
+    consumer (RegimeEngine's CONSOLIDATION/EXPANSION boundary tracking)
+    should read instead of `price`. Deliberately does NOT change this
+    engine's own wick-based swing/break semantics -- see the module
+    docstring's dated note for the scoping rationale (Phase 13's
+    boundary use only, not a Phase 11 structural redefinition)."""
     pivot_bar_id: str
     """Bar.bar_id of the extremum bar -- traceable back to the source bar."""
     confirmed_at_bar_id: str
@@ -208,6 +237,10 @@ def _confirmed_swing(
     methodology_version: int,
 ) -> SwingPoint:
     price = pivot.high if swing_type is SwingType.HIGH else pivot.low
+    body_price = (
+        max(pivot.open, pivot.close) if swing_type is SwingType.HIGH
+        else min(pivot.open, pivot.close)
+    )
     object_id = _swing_object_id(instrument_id, timeframe, level, swing_type, pivot.open_time_utc)
 
     return SwingPoint(
@@ -222,6 +255,7 @@ def _confirmed_swing(
         swing_type=swing_type,
         status=SwingStatus.CONFIRMED,
         price=price,
+        body_price=body_price,
         pivot_bar_id=pivot.bar_id,
         confirmed_at_bar_id=confirming_bar.bar_id,
         reversal_ticks=reversal_ticks,
@@ -245,6 +279,7 @@ def _broken_swing(confirmed: SwingPoint, *, breaking_bar: Bar) -> SwingPoint:
         swing_type=confirmed.swing_type,
         status=SwingStatus.BROKEN,
         price=confirmed.price,
+        body_price=confirmed.body_price,
         pivot_bar_id=confirmed.pivot_bar_id,
         confirmed_at_bar_id=breaking_bar.bar_id,
     )

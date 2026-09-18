@@ -30,7 +30,8 @@ from vo.observation.regime import (
     RegimeState,
     RegimeType,
 )
-from vo.observation.regime_config import load_regime_config
+from vo.observation.regime_config import build_regime_engine, load_regime_config
+from vo.observation.swing_config import load_swing_config
 from vo.observation.swings import SwingEngine, SwingLevel, SwingPoint, SwingStatus, SwingType
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="x", broker_symbol="US100.n")
@@ -122,6 +123,27 @@ def test_regime_config_loads_from_yaml():
     assert cfg.efficiency_ratio_period >= 1
     assert cfg.hurst_period >= 4
     assert 0.0 <= cfg.anticipation.er_chop_threshold <= cfg.anticipation.er_trend_threshold <= 1.0
+
+
+def test_build_regime_engine_defaults_methodology_version_from_config():
+    """Fixed 2026-09-18, alongside the bodies-not-wicks boundary change:
+    build_regime_engine used to silently ignore regime.yaml's own
+    `version` field and always stamp a bare methodology_version=1,
+    regardless of what the config file said -- so bumping regime.yaml's
+    version (1 -> 2, the same day, for this exact fix) would never have
+    actually reached a stamped RegimeState. Pinned directly: the default
+    must come from the loaded config, and an explicit override must
+    still win."""
+    regime_cfg = load_regime_config(_REPO_ROOT / "config" / "settings" / "regime.yaml")
+    swing_cfg = load_swing_config(_REPO_ROOT / "config" / "settings" / "swings.yaml")
+
+    engine = build_regime_engine(regime_cfg, swing_cfg, tick_size=1.0)
+    assert engine._methodology_version == regime_cfg.version
+
+    overridden = build_regime_engine(
+        regime_cfg, swing_cfg, tick_size=1.0, methodology_version=99
+    )
+    assert overridden._methodology_version == 99
 
 
 # ── the state machine ─────────────────────────────────────────────────
@@ -221,6 +243,7 @@ def test_unresolved_pullback_resolves_to_consolidation_on_failed_resumption():
         swing_type=SwingType.HIGH,
         status=SwingStatus.CONFIRMED,
         price=106.0,  # short of the 110.0 extreme -- resumption failed
+        body_price=106.0,
         pivot_bar_id="bar-5",
         confirmed_at_bar_id="bar-6",
         reversal_ticks=4,
@@ -285,6 +308,7 @@ def test_first_leg_pullback_does_not_stall_into_consolidation():
         swing_type=SwingType.HIGH,
         status=SwingStatus.CONFIRMED,
         price=106.0,  # short of the 110.0 extreme, same as the sibling test
+        body_price=106.0,
         pivot_bar_id="bar-5",
         confirmed_at_bar_id="bar-6",
         reversal_ticks=4,
@@ -322,6 +346,7 @@ def test_unresolved_pullback_still_resolves_to_retracement_on_real_resumption():
         swing_type=SwingType.LOW,
         status=SwingStatus.CONFIRMED,
         price=100.0,
+        body_price=100.0,
         pivot_bar_id="bar-3",
         confirmed_at_bar_id="bar-4",
         reversal_ticks=4,
@@ -351,6 +376,7 @@ def test_unresolved_pullback_still_resolves_to_retracement_on_real_resumption():
         swing_type=SwingType.HIGH,
         status=SwingStatus.CONFIRMED,
         price=112.0,  # clears the 110.0 extreme
+        body_price=112.0,
         pivot_bar_id="bar-5",
         confirmed_at_bar_id="bar-6",
         reversal_ticks=4,
@@ -364,6 +390,126 @@ def test_unresolved_pullback_still_resolves_to_retracement_on_real_resumption():
     assert [s.regime for s in emitted] == [RegimeType.RETRACEMENT, RegimeType.EXPANSION]
     assert emitted[0].supersedes == "unresolved-2"
     assert engine.current_regime() is RegimeType.EXPANSION
+
+
+def test_higher_high_and_lower_low_use_body_not_wick():
+    """The 2026-09-18 bodies-not-wicks fix, pinned directly: Lesson 1
+    states the consolidation range is "defined specifically by the
+    bodies of the candles not the wicks." A swing whose WICK clears the
+    prior swing's wick but whose BODY does not must NOT count as a
+    higher-high/lower-low -- and the reverse (wick falls short, body
+    clears) must count. Constructed directly rather than through the
+    real SwingEngine, same style as the wick-vs-close REVERSAL test
+    below, to pin the exact boundary rather than rely on the full-tape
+    integration test to happen to exercise it."""
+    engine = _make_engine()
+    engine._prev_high = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-prev-high",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=110.0,
+        body_price=108.0,
+        pivot_bar_id="bar-1",
+        confirmed_at_bar_id="bar-2",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-1",
+    )
+
+    wick_only_break = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-wick-only",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=111.0,  # wick clears the prior 110.0 wick...
+        body_price=107.0,  # ...but the body falls short of the prior 108.0 body
+        pivot_bar_id="bar-5",
+        confirmed_at_bar_id="bar-6",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-5",
+    )
+    assert engine._is_higher_high(wick_only_break) is False
+
+    body_break = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-body-break",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=109.0,  # wick falls short of the prior 110.0 wick...
+        body_price=109.0,  # ...but the body clears the prior 108.0 body
+        pivot_bar_id="bar-7",
+        confirmed_at_bar_id="bar-8",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-7",
+    )
+    assert engine._is_higher_high(body_break) is True
+
+    # Symmetric for the DOWN side (_is_lower_low / _prev_low).
+    engine._prev_low = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-prev-low",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.LOW,
+        status=SwingStatus.CONFIRMED,
+        price=90.0,
+        body_price=92.0,
+        pivot_bar_id="bar-9",
+        confirmed_at_bar_id="bar-10",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=96.0,
+        reversal_extreme_bar_id="bar-9",
+    )
+    wick_only_low = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-wick-only-low",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.LOW,
+        status=SwingStatus.CONFIRMED,
+        price=89.0,  # wick clears the prior 90.0 wick...
+        body_price=93.0,  # ...but the body does not clear the prior 92.0 body
+        pivot_bar_id="bar-11",
+        confirmed_at_bar_id="bar-12",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=96.0,
+        reversal_extreme_bar_id="bar-11",
+    )
+    assert engine._is_lower_low(wick_only_low) is False
 
 
 def test_no_lookahead():

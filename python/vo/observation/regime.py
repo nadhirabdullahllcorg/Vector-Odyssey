@@ -88,6 +88,39 @@ across a G6 review before any code; the agreed shape:
   strengthens the [VO-D] reconciliation's ICT grounding beyond a bare
   hypothesis, and is recorded as-stated rather than re-interpreted.
 
+  BODIES, NOT WICKS, ARE THE AUTHORITATIVE BOUNDARY (added 2026-09-18,
+  same day, confirmed via G6 human review): Lesson 1 states directly that
+  the consolidation range is "defined specifically by the bodies of the
+  candles not the wicks" -- a real discrepancy against this engine's
+  original wick-based boundaries, flagged in vo-phase-plan.md as an open
+  question and now resolved. `SwingPoint.body_price` (vo.observation.
+  swings, additive, 2026-09-18) records each pivot's body extreme
+  alongside the existing wick-based `price`; this engine now reads
+  `body_price` everywhere a boundary is tracked or compared --
+  `_is_higher_high`/`_is_lower_low` (the CONSOLIDATION -> EXPANSION
+  trigger itself), `_extreme_price`/`_defining_price` (set in
+  `_enter_expansion`, `_expansion_swing`, `_resolve_retracement`,
+  `_resolve_reversal`) -- while `_defining_broken`'s existing bar-level
+  `current.close` check (v30) is left as-is, already body-consistent by
+  construction. Scoped deliberately: Phase 11's Swing Engine keeps its
+  own wick-based `price` for structural swing/break identification
+  itself (unspecified body-vs-wick anywhere in Month 1, and not this
+  round's G6 review) -- only Phase 13's own boundary use of a confirmed
+  swing changes. This is a real behavior change to the classifier
+  (methodology_version bump, G4; config/settings/regime.yaml's `version`
+  moved 1 -> 2) -- the frozen 1,000,000-bar baseline and its v33-v36
+  validation reports were built under the old wick-based boundaries and
+  need re-running before being trusted again under this version. NOT yet
+  built, deliberately deferred pending its own transcript verification:
+  the user separately described an equilibrium-relative "moves quickly"
+  velocity component to the EXPANSION trigger, and an "order block" the
+  market makers leave at/near equilibrium -- order blocks are Month 4
+  curriculum per vo-curriculum.md's own governance rule and were
+  explicitly excluded from this round; the velocity claim is not yet
+  cross-checked word-for-word against the Lesson 1/2 transcripts, so it
+  is not hardened here either. See vo-phase-plan.md §9 for both as open
+  items.
+
   ANTICIPATION (the user's ask, reconciled with "observe, don't forecast"):
   while unresolved, the record carries an evidence-backed [VO-H] LEAN --
   anticipated RETRACEMENT / REVERSAL / UNCLEAR -- from the Efficiency
@@ -381,17 +414,22 @@ class RegimeEngine:
             self._prev_low, self._last_low = self._last_low, swing
 
     def _is_higher_high(self, swing: SwingPoint) -> bool:
+        """[VO-D], 2026-09-18: compares BODY price, not wick price -- see
+        the module docstring's dated note. Lesson 1: the range is
+        'defined specifically by the bodies of the candles not the
+        wicks.'"""
         return (
             swing.swing_type is SwingType.HIGH
             and self._prev_high is not None
-            and swing.price > self._prev_high.price
+            and swing.body_price > self._prev_high.body_price
         )
 
     def _is_lower_low(self, swing: SwingPoint) -> bool:
+        """[VO-D], 2026-09-18: see _is_higher_high's docstring."""
         return (
             swing.swing_type is SwingType.LOW
             and self._prev_low is not None
-            and swing.price < self._prev_low.price
+            and swing.body_price < self._prev_low.body_price
         )
 
     def _defining_broken(self, current: Bar) -> bool:
@@ -438,17 +476,17 @@ class RegimeEngine:
         assert self._direction is not None
         if self._direction is RegimeDirection.UP:
             if self._is_higher_high(swing):  # expansion extends
-                self._extreme_price = swing.price
+                self._extreme_price = swing.body_price
                 if self._last_low is not None:
-                    self._defining_price = self._last_low.price
+                    self._defining_price = self._last_low.body_price
                 return []
             if swing.swing_type is SwingType.LOW:  # a pullback low formed
                 return self._enter_pullback(current, er)
         else:
             if self._is_lower_low(swing):
-                self._extreme_price = swing.price
+                self._extreme_price = swing.body_price
                 if self._last_high is not None:
-                    self._defining_price = self._last_high.price
+                    self._defining_price = self._last_high.body_price
                 return []
             if swing.swing_type is SwingType.HIGH:
                 return self._enter_pullback(current, er)
@@ -475,7 +513,7 @@ class RegimeEngine:
         if self._direction is RegimeDirection.UP:
             if swing.swing_type is not SwingType.HIGH:
                 return []
-            if swing.price > self._extreme_price:
+            if swing.body_price > self._extreme_price:
                 return self._resolve_retracement(swing, current, er)
             if self._resolved_since_consolidation:
                 return self._resolve_consolidation(current, er)
@@ -483,7 +521,7 @@ class RegimeEngine:
         else:
             if swing.swing_type is not SwingType.LOW:
                 return []
-            if swing.price < self._extreme_price:
+            if swing.body_price < self._extreme_price:
                 return self._resolve_retracement(swing, current, er)
             if self._resolved_since_consolidation:
                 return self._resolve_consolidation(current, er)
@@ -501,10 +539,11 @@ class RegimeEngine:
         previous = self._regime
         self._regime = RegimeType.EXPANSION
         self._direction = direction
-        self._extreme_price = swing.price
+        self._extreme_price = swing.body_price
         self._defining_price = (
-            self._last_low.price if direction is RegimeDirection.UP and self._last_low
-            else self._last_high.price if direction is RegimeDirection.DOWN and self._last_high
+            self._last_low.body_price if direction is RegimeDirection.UP and self._last_low
+            else self._last_high.body_price
+            if direction is RegimeDirection.DOWN and self._last_high
             else None
         )
         confidence = er if er is not None else 0.5
@@ -515,7 +554,7 @@ class RegimeEngine:
             confidence=confidence,
             evidence=(
                 f"confirmed {'higher high' if direction is RegimeDirection.UP else 'lower low'}"
-                f" at {swing.price} breaks prior swing extreme"
+                f" (body) at {swing.body_price} breaks prior swing extreme"
             ),
             er=er,
         )
@@ -552,7 +591,10 @@ class RegimeEngine:
             RegimeType.RETRACEMENT,
             direction=self._direction,
             confidence=1.0,
-            evidence=f"expansion resumed: new extreme at {swing.price}, defining swing intact",
+            evidence=(
+                f"expansion resumed: new extreme (body) at {swing.body_price}, "
+                "defining swing intact"
+            ),
             er=er,
             supersedes=self._unresolved.object_id if self._unresolved else None,
         )
@@ -636,10 +678,18 @@ class RegimeEngine:
         self._regime = RegimeType.REVERSAL
         previous = RegimeType.REVERSAL
         self._direction = new_direction
-        self._extreme_price = current.low if new_direction is RegimeDirection.DOWN else current.high
+        # [VO-D], 2026-09-18: the new direction's starting extreme is now
+        # the reversal bar's own BODY extreme, not its wick, for the same
+        # bodies-not-wicks reason as everywhere else in this file.
+        self._extreme_price = (
+            min(current.open, current.close) if new_direction is RegimeDirection.DOWN
+            else max(current.open, current.close)
+        )
         self._defining_price = (
-            self._last_high.price if new_direction is RegimeDirection.DOWN and self._last_high
-            else self._last_low.price if new_direction is RegimeDirection.UP and self._last_low
+            self._last_high.body_price
+            if new_direction is RegimeDirection.DOWN and self._last_high
+            else self._last_low.body_price
+            if new_direction is RegimeDirection.UP and self._last_low
             else None
         )
         self._regime = RegimeType.EXPANSION

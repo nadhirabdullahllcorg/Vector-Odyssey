@@ -9,7 +9,20 @@
 # swings.yaml, they are [VO-D]/[VO-H] starting points, to be validated
 # against historical data. Changing one does not re-litigate the algorithm,
 # only bumps `version`.
-version: 1
+#
+# v2 (2026-09-18): CONSOLIDATION/EXPANSION boundaries switched from
+# wick-based swing prices to candle-BODY prices (SwingPoint.body_price),
+# confirmed via G6 human review -- Lesson 1: the consolidation range is
+# "defined specifically by the bodies of the candles not the wicks."
+# This is a real classifier behavior change (RegimeEngine._is_higher_high
+# / _is_lower_low and the _extreme_price/_defining_price boundary
+# tracking), not a config-value tweak -- the frozen 1,000,000-bar
+# baseline and its v33-v36 validation reports were built under v1's
+# wick-based boundaries and need re-running under v2 before being
+# trusted again. build_regime_engine() (regime_config.py) now defaults
+# methodology_version from this field -- previously it silently ignored
+# it and always stamped a bare 1, a latent gap fixed the same day.
+version: 2
 
 # Which swing tier is the structural backbone: SWING (larger) or INTERNAL.
 tier: SWING
