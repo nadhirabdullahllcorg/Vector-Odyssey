@@ -26,6 +26,68 @@ across a G6 review before any code; the agreed shape:
   -- never an overwrite (G5), the same CONFIRMED->BROKEN discipline
   SwingPoint uses.
 
+  CONSOLIDATION RE-ENTRY (added 2026-09-18, grounded directly in Lesson 1's
+  own words, not invented): "either it goes back to a consolidation again
+  or it goes to a retracement... after the reversal pattern it'll see
+  another retracement then back to potentially consolidation." A pullback
+  has a THIRD honest outcome, not just RETRACEMENT/REVERSAL: if a
+  same-direction swing forms attempting to resume the trend but FAILS to
+  reach a new extreme (and no bar-level break has fired REVERSAL), price
+  is now contained between the expansion's extreme and the defining
+  swing -- exactly this engine's own CONSOLIDATION definition ("confirmed
+  swings contained between a high and a low with neither broken"), so it
+  resolves there instead of being left to wait indefinitely. Also an
+  APPEND superseding the PULLBACK_UNRESOLVED it revises, same G5
+  discipline as RETRACEMENT/REVERSAL. This does NOT weaken the Month 1
+  constraint below -- CONSOLIDATION is still only ever *entered* from a
+  resolving PULLBACK_UNRESOLVED (which itself only exists inside an
+  EXPANSION), never reached directly from a bare swing the way
+  EXPANSION is from CONSOLIDATION.
+
+  CONSOLIDATION RE-ENTRY, FIRST-CYCLE RESTRICTION (added 2026-09-18, same
+  day, once Lesson 2 was supplied): Lesson 2 states, flatly and multiple
+  times, "it does not do consolidation expansion consolidation, that does
+  not happen" -- yet the SAME lecture's own daily-range walkthrough
+  describes consolidation recurring several times across one session
+  (Asian consolidation -> expansion -> reversal -> expansion -> NY
+  consolidation -> retracement -> expansion/reversal -> London-close
+  reversal -> consolidation). Both are real source statements; they are
+  reconciled here with a [VO-D] hypothesis, confirmed with the user via
+  human review (G6), NOT itself literally stated by ICT: the FIRST
+  expansion leaving a consolidation must resolve through RETRACEMENT or
+  REVERSAL -- it may never stall straight back into CONSOLIDATION on that
+  first leg. Only a LATER expansion within the same departure cycle (one
+  reached only after a RETRACEMENT or REVERSAL has actually resolved) is
+  eligible to stall into a new CONSOLIDATION via the mechanism above.
+  Tracked by `_resolved_since_consolidation`: False on init and on
+  (re-)entering CONSOLIDATION, set True the moment a RETRACEMENT or
+  REVERSAL resolves, gating `_unresolved_swing`'s failed-resumption
+  branch. This is VO's own reconciliation of two ICT passages, not a
+  third ICT-literal fact -- flagged as such rather than silently folded
+  in as if it were as certain as the rest of this state machine.
+
+  PRICE DELIVERY FRAMING (added 2026-09-18, same day, user clarification
+  after reviewing the fix): the user restated the same restriction in
+  ICT's own vocabulary rather than VO's -- "it never goes from expansion
+  consolidation back to expansion" within one price delivery, "price
+  delivery algorithm always starts in consolidation to restart price
+  delivery," and "consolidation can come after expansion but only in a
+  new price delivery." This is the SAME constraint `_resolved_since_consolidation`
+  already enforces, restated as the underlying ICT concept rather than an
+  arbitrary VO rule: a stall back to CONSOLIDATION is not a pause inside
+  the current price delivery (that is the Lesson-2-forbidden
+  consolidation-expansion-consolidation loop) -- it IS the boundary where
+  the current price delivery has finished and a new one begins. That
+  boundary can only be real once the current price delivery has actually
+  delivered somewhere (a RETRACEMENT or REVERSAL has resolved); a failed
+  first expansion leg has not delivered anything yet, so it cannot yet be
+  "a new price delivery" and must stay PULLBACK_UNRESOLVED. This still
+  does not upgrade the tag above to a literal [ICT] transcript quote --
+  it is the user's own paraphrase of the concept, given directly rather
+  than sourced from a specific lecture line -- but it substantially
+  strengthens the [VO-D] reconciliation's ICT grounding beyond a bare
+  hypothesis, and is recorded as-stated rather than re-interpreted.
+
   ANTICIPATION (the user's ask, reconciled with "observe, don't forecast"):
   while unresolved, the record carries an evidence-backed [VO-H] LEAN --
   anticipated RETRACEMENT / REVERSAL / UNCLEAR -- from the Efficiency
@@ -250,6 +312,24 @@ class RegimeEngine:
         self._defining_price: float | None = None  # break of this vs direction => REVERSAL
         self._extreme_price: float | None = None  # expansion's furthest point
         self._unresolved: RegimeState | None = None
+        # [VO-D] hypothesis, 2026-09-18 -- see the module docstring's dated
+        # note: Lesson 2 states flatly, and repeatedly, "it does not do
+        # consolidation expansion consolidation, that does not happen" --
+        # yet the SAME lecture's own daily-range walkthrough describes
+        # consolidation recurring multiple times across a session. This
+        # flag is VO's own reconciliation, not literally stated by ICT:
+        # the FIRST expansion leaving a consolidation must resolve through
+        # RETRACEMENT or REVERSAL -- it may not stall straight back into
+        # CONSOLIDATION. Only a LATER expansion (one reached after at
+        # least one such resolution) is eligible to stall into a new
+        # CONSOLIDATION. Reset False on entering CONSOLIDATION; set True
+        # the moment a RETRACEMENT or REVERSAL actually resolves.
+        # Same-day user clarification, restated in ICT's own vocabulary:
+        # a stall to CONSOLIDATION is only ever the START of a NEW price
+        # delivery, never a pause inside the current one -- so it can only
+        # fire once the current price delivery has actually delivered
+        # somewhere (True below), never on the first, undelivered leg.
+        self._resolved_since_consolidation: bool = False
 
     def current_regime(self) -> RegimeType:
         return self._regime
@@ -378,15 +458,36 @@ class RegimeEngine:
         self, swing: SwingPoint, current: Bar, er: float | None
     ) -> list[RegimeState]:
         # A new extreme in the expansion direction, defining swing intact,
-        # resolves the pullback to RETRACEMENT -> back to EXPANSION.
+        # resolves the pullback to RETRACEMENT -> back to EXPANSION. A
+        # same-direction swing that FAILS to reach a new extreme -- the
+        # trend tried to resume and stalled, with the defining swing still
+        # holding (a bar-level break would already have fired REVERSAL in
+        # on_bar before any swing gets here) -- is Lesson 1's third
+        # outcome: contained structure, i.e. CONSOLIDATION -- BUT ONLY if
+        # a RETRACEMENT or REVERSAL has already resolved since the current
+        # consolidation-departure cycle began (see _resolved_since_
+        # consolidation's docstring: Lesson 2 explicitly rules out a bare
+        # CONSOLIDATION -> EXPANSION -> CONSOLIDATION on the FIRST leg).
+        # Absent that, this stays unresolved -- same as before either fix.
+        # A swing on the OTHER side (a deeper pullback, not an attempt to
+        # resume) also stays unresolved, unchanged.
         assert self._direction is not None and self._extreme_price is not None
         if self._direction is RegimeDirection.UP:
-            resumed = swing.swing_type is SwingType.HIGH and swing.price > self._extreme_price
+            if swing.swing_type is not SwingType.HIGH:
+                return []
+            if swing.price > self._extreme_price:
+                return self._resolve_retracement(swing, current, er)
+            if self._resolved_since_consolidation:
+                return self._resolve_consolidation(current, er)
+            return []
         else:
-            resumed = swing.swing_type is SwingType.LOW and swing.price < self._extreme_price
-        if resumed:
-            return self._resolve_retracement(swing, current, er)
-        return []
+            if swing.swing_type is not SwingType.LOW:
+                return []
+            if swing.price < self._extreme_price:
+                return self._resolve_retracement(swing, current, er)
+            if self._resolved_since_consolidation:
+                return self._resolve_consolidation(current, er)
+            return []
 
     # ── transitions ─────────────────────────────────────────────────────
 
@@ -462,10 +563,54 @@ class RegimeEngine:
             "pullback held; trend resumed",
         )
         self._unresolved = None
+        # A RETRACEMENT has now resolved -- a LATER expansion in this same
+        # cycle is eligible to stall into CONSOLIDATION (see
+        # _resolved_since_consolidation's docstring; 2026-09-18).
+        self._resolved_since_consolidation = True
         # ... -> RETRACEMENT -> EXPANSION (Month 1 structure).
         self._regime = RegimeType.RETRACEMENT
         expansion = self._enter_expansion(self._direction, swing, current, er)
         return [retr, *expansion]
+
+    def _resolve_consolidation(self, current: Bar, er: float | None) -> list[RegimeState]:
+        """Lesson 1's third pullback outcome (see the module docstring's
+        2026-09-18 note): the trend attempted to resume, failed to make a
+        new extreme, and the defining swing still holds -- structure is
+        now contained between the two, exactly this engine's own
+        CONSOLIDATION definition. An append, like every other resolution
+        (G5): supersedes the PULLBACK_UNRESOLVED it revises. Unlike
+        _resolve_retracement/_resolve_reversal, there is no immediate
+        re-entry into EXPANSION -- CONSOLIDATION waits for the next
+        confirmed higher-high/lower-low, same as the engine's initial
+        state (_on_confirmed_swing already handles that re-entry)."""
+        con = self._emit_state(
+            current,
+            RegimeType.CONSOLIDATION,
+            direction=None,
+            confidence=1.0,
+            evidence=(
+                "pullback failed to extend the expansion and the defining swing held: "
+                "swings now contained between the range extremes"
+            ),
+            er=er,
+            supersedes=self._unresolved.object_id if self._unresolved else None,
+        )
+        self._emit_transition(
+            current,
+            RegimeType.PULLBACK_UNRESOLVED,
+            RegimeType.CONSOLIDATION,
+            "swings contained; neither trend resumption nor structure break",
+        )
+        self._unresolved = None
+        self._regime = RegimeType.CONSOLIDATION
+        self._direction = None
+        self._extreme_price = None
+        self._defining_price = None
+        # Back in CONSOLIDATION: the NEXT departure starts a fresh cycle,
+        # so the next expansion is once again a "first leg" that may not
+        # stall straight back into CONSOLIDATION (2026-09-18).
+        self._resolved_since_consolidation = False
+        return [con]
 
     def _resolve_reversal(self, current: Bar, er: float | None) -> list[RegimeState]:
         assert self._direction is not None
@@ -483,6 +628,9 @@ class RegimeEngine:
             current, RegimeType.PULLBACK_UNRESOLVED, RegimeType.REVERSAL, "defining swing broken"
         )
         self._unresolved = None
+        # A REVERSAL has now resolved -- same reasoning as _resolve_retracement
+        # above (2026-09-18).
+        self._resolved_since_consolidation = True
         # ... -> REVERSAL -> EXPANSION in the NEW direction (Month 1 structure).
         new_direction = RegimeDirection.DOWN if broken_up else RegimeDirection.UP
         self._regime = RegimeType.REVERSAL

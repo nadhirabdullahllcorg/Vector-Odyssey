@@ -4,8 +4,10 @@ Basic Regime Engine (vo.observation.regime), Phase 13 / gate G6.
 Covers the value-type invariants, config loading, and -- the substance --
 the state machine over a synthetic rise-then-fall tape: the Month 1
 transition structure (never CONSOLIDATION -> RETRACEMENT/REVERSAL
-directly), the append-only PULLBACK_UNRESOLVED -> resolution discipline,
-the [VO-H] anticipation lean on every unresolved state, and no lookahead
+directly), the append-only PULLBACK_UNRESOLVED -> resolution discipline
+(RETRACEMENT / REVERSAL / -- as of 2026-09-18, per Lesson 1's own words --
+CONSOLIDATION when the pullback stalls into containment), the [VO-H]
+anticipation lean on every unresolved state, and no lookahead
 (assert_no_lookahead -- the second real engine, after SwingEngine, to be
 driven by Phase 9's harness).
 """
@@ -29,7 +31,7 @@ from vo.observation.regime import (
     RegimeType,
 )
 from vo.observation.regime_config import load_regime_config
-from vo.observation.swings import SwingEngine, SwingLevel
+from vo.observation.swings import SwingEngine, SwingLevel, SwingPoint, SwingStatus, SwingType
 
 _INSTRUMENT = InstrumentId(platform="MT5", broker_server="x", broker_symbol="US100.n")
 _T0 = datetime(2026, 9, 10, 7, 0, tzinfo=UTC)
@@ -154,9 +156,15 @@ def test_machine_runs_and_respects_the_month1_invariants():
         if s.regime is RegimeType.PULLBACK_UNRESOLVED:
             assert s.anticipated_resolution is not None
 
-    # A resolution is an append that supersedes a real PULLBACK_UNRESOLVED.
+    # A resolution is an append that supersedes a real PULLBACK_UNRESOLVED --
+    # RETRACEMENT/REVERSAL, and (2026-09-18) CONSOLIDATION when a pullback
+    # stalls into containment rather than resuming or breaking structure.
     for s in states:
-        if s.regime in (RegimeType.RETRACEMENT, RegimeType.REVERSAL):
+        if s.regime in (RegimeType.RETRACEMENT, RegimeType.REVERSAL, RegimeType.CONSOLIDATION):
+            # The engine's own initial CONSOLIDATION (set in __init__) is never
+            # emitted as a record -- every CONSOLIDATION that IS emitted comes
+            # from _resolve_consolidation, which always supersedes a real
+            # PULLBACK_UNRESOLVED, so there is no first-record exception here.
             assert s.supersedes is not None
             superseded = engine.states.get(s.supersedes)
             assert superseded is not None
@@ -166,6 +174,196 @@ def test_machine_runs_and_respects_the_month1_invariants():
     # and once ER/Hurst have enough history, supporting features appear.
     assert all(s.evidence for s in states)
     assert any(s.supporting_features for s in states)
+
+
+def test_unresolved_pullback_resolves_to_consolidation_on_failed_resumption():
+    """Direct check of the exact boundary this fix adds -- same style as
+    test_defining_broken_requires_a_close_not_a_bare_wick below: engine
+    state is set directly rather than driven through the real SwingEngine,
+    since test_machine_runs_and_respects_the_month1_invariants already
+    covers the integration path. Grounded in Lesson 1's own words: "either
+    it goes back to a consolidation again or it goes to a retracement" --
+    a same-direction swing that tries to resume the trend but fails to
+    reach a new extreme, with the defining swing still holding, is
+    Lesson 1's third pullback outcome, not an indefinite wait."""
+    engine = _make_engine()
+    engine._regime = RegimeType.PULLBACK_UNRESOLVED
+    engine._direction = RegimeDirection.UP
+    engine._extreme_price = 110.0
+    engine._defining_price = 100.0
+    # A RETRACEMENT/REVERSAL has already resolved earlier in this
+    # departure cycle -- required per the 2026-09-18 first-cycle
+    # restriction (Lesson 2: "does not do consolidation expansion
+    # consolidation" on the FIRST leg) for this stall to be allowed
+    # to resolve to CONSOLIDATION at all. See
+    # test_first_leg_pullback_does_not_stall_into_consolidation below
+    # for the case where this is False.
+    engine._resolved_since_consolidation = True
+    unresolved = _state(
+        object_id="unresolved-1",
+        regime=RegimeType.PULLBACK_UNRESOLVED,
+        direction=RegimeDirection.UP,
+        anticipated_resolution=AnticipatedResolution.UNCLEAR,
+    )
+    engine.states.append(unresolved)
+    engine._unresolved = unresolved
+
+    current = _bar(5, 106.0)
+    failed_retest = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-failed-retest",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=106.0,  # short of the 110.0 extreme -- resumption failed
+        pivot_bar_id="bar-5",
+        confirmed_at_bar_id="bar-6",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-5",
+    )
+
+    emitted = engine._unresolved_swing(failed_retest, current, er=0.4)
+
+    assert len(emitted) == 1
+    resolved = emitted[0]
+    assert resolved.regime is RegimeType.CONSOLIDATION
+    assert resolved.direction is None
+    assert resolved.supersedes == "unresolved-1"
+    assert engine.current_regime() is RegimeType.CONSOLIDATION
+    assert engine._direction is None
+    assert engine._extreme_price is None
+    assert engine._defining_price is None
+
+    transitions = list(engine.transitions.all())
+    assert transitions[-1].from_state is RegimeType.PULLBACK_UNRESOLVED
+    assert transitions[-1].to_state is RegimeType.CONSOLIDATION
+
+
+def test_first_leg_pullback_does_not_stall_into_consolidation():
+    """The 2026-09-18 first-cycle restriction, pinned directly: Lesson 2
+    states flatly, and repeatedly, "it does not do consolidation
+    expansion consolidation, that does not happen" -- the FIRST expansion
+    leaving a consolidation must resolve through RETRACEMENT or REVERSAL,
+    not stall straight back into CONSOLIDATION. Same setup as
+    test_unresolved_pullback_resolves_to_consolidation_on_failed_resumption
+    above, EXCEPT _resolved_since_consolidation is left False (the
+    default -- no RETRACEMENT/REVERSAL has resolved yet in this cycle).
+    The failed retest must leave the pullback unresolved, not resolve it
+    to CONSOLIDATION."""
+    engine = _make_engine()
+    engine._regime = RegimeType.PULLBACK_UNRESOLVED
+    engine._direction = RegimeDirection.UP
+    engine._extreme_price = 110.0
+    engine._defining_price = 100.0
+    assert engine._resolved_since_consolidation is False  # the default
+    unresolved = _state(
+        object_id="unresolved-first-leg",
+        regime=RegimeType.PULLBACK_UNRESOLVED,
+        direction=RegimeDirection.UP,
+        anticipated_resolution=AnticipatedResolution.UNCLEAR,
+    )
+    engine.states.append(unresolved)
+    engine._unresolved = unresolved
+
+    current = _bar(5, 106.0)
+    failed_retest = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-failed-retest-first-leg",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=106.0,  # short of the 110.0 extreme, same as the sibling test
+        pivot_bar_id="bar-5",
+        confirmed_at_bar_id="bar-6",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-5",
+    )
+
+    emitted = engine._unresolved_swing(failed_retest, current, er=0.4)
+
+    assert emitted == []
+    assert engine.current_regime() is RegimeType.PULLBACK_UNRESOLVED
+    assert engine._unresolved is unresolved  # unchanged, still the same record
+
+
+def test_unresolved_pullback_still_resolves_to_retracement_on_real_resumption():
+    """Same setup, but the swing DOES clear the extreme -- must still
+    resolve to RETRACEMENT (then re-enter EXPANSION), unchanged by this
+    fix. Guards against the failed-resumption branch swallowing the
+    genuine-resumption case."""
+    engine = _make_engine()
+    engine._regime = RegimeType.PULLBACK_UNRESOLVED
+    engine._direction = RegimeDirection.UP
+    engine._extreme_price = 110.0
+    engine._defining_price = 100.0
+    engine._last_low = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-low-anchor",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.LOW,
+        status=SwingStatus.CONFIRMED,
+        price=100.0,
+        pivot_bar_id="bar-3",
+        confirmed_at_bar_id="bar-4",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=104.0,
+        reversal_extreme_bar_id="bar-3",
+    )
+    unresolved = _state(
+        object_id="unresolved-2",
+        regime=RegimeType.PULLBACK_UNRESOLVED,
+        direction=RegimeDirection.UP,
+        anticipated_resolution=AnticipatedResolution.UNCLEAR,
+    )
+    engine.states.append(unresolved)
+    engine._unresolved = unresolved
+
+    current = _bar(5, 112.0)
+    real_resumption = SwingPoint(
+        instrument_id=_INSTRUMENT,
+        timeframe=Timeframe.M1,
+        object_type="SWING",
+        object_id="swing-real-resumption",
+        observed_at=_T0,
+        recorded_at=_T0,
+        methodology_version=1,
+        level=SwingLevel.INTERNAL,
+        swing_type=SwingType.HIGH,
+        status=SwingStatus.CONFIRMED,
+        price=112.0,  # clears the 110.0 extreme
+        pivot_bar_id="bar-5",
+        confirmed_at_bar_id="bar-6",
+        reversal_ticks=4,
+        atr_ticks_at_pivot=2,
+        reversal_extreme_price=108.0,
+        reversal_extreme_bar_id="bar-5",
+    )
+
+    emitted = engine._unresolved_swing(real_resumption, current, er=0.6)
+
+    assert [s.regime for s in emitted] == [RegimeType.RETRACEMENT, RegimeType.EXPANSION]
+    assert emitted[0].supersedes == "unresolved-2"
+    assert engine.current_regime() is RegimeType.EXPANSION
 
 
 def test_no_lookahead():
