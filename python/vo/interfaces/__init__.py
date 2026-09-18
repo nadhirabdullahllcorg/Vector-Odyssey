@@ -20,10 +20,22 @@ from vo.interfaces.concepts import (
     decision_path,
 )
 from vo.interfaces.decisions import Decision, Direction
+from vo.interfaces.signals import (
+    AllocationError,
+    AllocationSignal,
+    RiskCheck,
+    RiskCheckError,
+    Signal,
+    SignalError,
+    StrategyOutput,
+    TradeSignal,
+)
 from vo.interfaces.strategy import IVOStrategy, StrategyContext
 
 __all__ = [
     "REGISTRY",
+    "AllocationError",
+    "AllocationSignal",
     "AppendOnlyLog",
     "CanonicalRecord",
     "CanonicalRecordError",
@@ -34,7 +46,13 @@ __all__ = [
     "Decision",
     "Direction",
     "IVOStrategy",
+    "RiskCheck",
+    "RiskCheckError",
+    "Signal",
+    "SignalError",
     "StrategyContext",
+    "StrategyOutput",
+    "TradeSignal",
     "concept",
     "decision_path",
 ]

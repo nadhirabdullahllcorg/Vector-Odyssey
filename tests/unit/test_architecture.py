@@ -9,6 +9,7 @@ complaint.
     G2  no [VO-H] concept is reachable from the trade decision path
     G7  the EA contains no strategy logic; nothing but the broker adapter
         imports MetaTrader5
+    G14 risk is the sole producer of TradeSignal
 
 Plus the layering rule: a module may import its own layer or lower, never higher.
 """
@@ -38,8 +39,11 @@ LAYERS: dict[str, int] = {
     "vo.observation": 3,
     "vo.month01": 4,
     "vo.research": 5,
-    "vo.core": 6,
-    "vo.telemetry": 7,
+    "vo.signals": 6,
+    "vo.allocation": 7,
+    "vo.risk": 8,
+    "vo.core": 9,
+    "vo.telemetry": 10,
 }
 
 # Only this module may talk to the terminal.
@@ -177,6 +181,44 @@ def test_only_the_broker_adapter_imports_metatrader5() -> None:
     assert not offenders, (
         f"Only {sorted(MT5_ADAPTER_MODULES)} may import MetaTrader5. "
         f"Offenders: {sorted(offenders)}"
+    )
+
+
+# ── G14: risk is the sole TradeSignal producer ──────────────────────────────
+#
+# Phase 14's own gate (architecture/vo-phase-plan.md Block 4): "risk is the
+# sole TradeSignal producer." Enforced the same way G7 enforces its MT5
+# import rule: by scanning for the one thing that must not happen anywhere
+# else -- here, a TradeSignal( constructor call -- rather than trusting a
+# docstring to stay true.
+
+TRADE_SIGNAL_PRODUCER_MODULES = frozenset({"vo.risk.manager"})
+
+
+def test_risk_is_the_sole_trade_signal_producer() -> None:
+    offenders: list[str] = []
+
+    for path in _python_files(VO_ROOT):
+        module = _module_name(path, VO_ROOT)
+
+        if module in TRADE_SIGNAL_PRODUCER_MODULES:
+            continue
+
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+
+            if name == "TradeSignal":
+                offenders.append(module)
+
+    assert not offenders, (
+        f"Only {sorted(TRADE_SIGNAL_PRODUCER_MODULES)} may construct a TradeSignal. "
+        f"Offenders: {sorted(set(offenders))}"
     )
 
 
@@ -388,6 +430,14 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.observation.hurst",
         "vo.observation.regime",
         "vo.observation.regime_config",
+        "vo.interfaces.signals",
+        "vo.signals",
+        "vo.signals.generator",
+        "vo.allocation",
+        "vo.allocation.allocator",
+        "vo.risk",
+        "vo.risk.risk_config",
+        "vo.risk.manager",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:

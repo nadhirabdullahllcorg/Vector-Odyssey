@@ -1,0 +1,41 @@
+# config/settings/risk.yaml        versioned; research starting points
+#
+# Phase 14 (Risk manager). Deliberately mechanical, matching this phase's
+# own scope: risk a fixed fraction of account equity against whatever stop
+# distance the strategy states, rounded to the broker's lot-step rules.
+# The regime-conditioned ATR-based stop/target sizing architecture/
+# vo-trade-logic-and-brain-plan.md describes ("ATR-inverse position sizing
+# across instruments with different volatility profiles") is explicitly
+# Phase 32 scope, built on top of this once it exists -- not this file's
+# job, and not assumed here.
+#
+# THE VALUES BELOW ARE NOT A FINISHED ANSWER -- like swings.yaml/regime.yaml,
+# they are [VO-D] starting points. Changing one does not re-litigate the
+# sizing algorithm, only bumps `version`.
+version: 1
+
+# Fraction of current account EQUITY risked on one trade if its stop is
+# hit. 0.01 = 1%. Conservative on purpose: 1xTrade has no demo tier
+# (architecture/vo-trade-logic-and-brain-plan.md SS1), and this is the
+# first phase capable of sizing a real position at all.
+risk_per_trade_fraction: 0.01
+
+# Broker lot-size rounding. vo.market.symbol.Symbol does not yet carry
+# volume_min/volume_max/volume_step (Phase 12 built it from what the read
+# API needed at the time) -- these three exist here as an explicit,
+# honestly-flagged stand-in until Symbol grows those fields from a live
+# symbol_info() read. Confirm against the real US100 symbol_info() before
+# trusting a live-sized position; these are placeholders, not observed
+# broker values.
+min_volume: 0.01
+max_volume: 5.0
+volume_step: 0.01
+
+# A hard ceiling on simultaneously open VO-managed positions. Independent
+# of, and in addition to, Phase 18's own separately-confirmed hard
+# position cap ("independent of the risk manager, so a risk-manager bug
+# can't be the only thing standing between a mistake and a real loss") --
+# that cap lives at the execution/EA layer once Phase 18 builds it; this
+# one is the risk engine's own ordinary rejection reason, not a
+# replacement for it.
+max_open_positions: 1

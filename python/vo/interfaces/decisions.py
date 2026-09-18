@@ -27,12 +27,17 @@ class Decision(Enum):
     """
     Where an evaluation ended.
 
-    The six outcomes are deliberately distinct, so that "nothing happened"
+    The seven outcomes are deliberately distinct, so that "nothing happened"
     can always be distinguished from "something was refused, and here is
     which layer refused it".
     """
 
     NO_SIGNAL = "NO_SIGNAL"
+    SIGNAL_PROPOSED = "SIGNAL_PROPOSED"
+    """A strategy found a candidate setup and proposed it -- Phase 14
+    addition (vo.interfaces.signals.StrategyOutput). Not yet evaluated by
+    the signal generator, allocator, or risk engine; not a refusal (see
+    _REFUSALS below, deliberately unchanged by this addition)."""
     SIGNAL_REJECTED = "SIGNAL_REJECTED"
     RISK_REJECTED = "RISK_REJECTED"
     NO_TRADE = "NO_TRADE"
