@@ -637,3 +637,19 @@ def test_trim_warmup_drops_clips_and_keeps_the_right_segments_and_markers() -> N
     assert [s.regime for s in kept] == [RegimeType.EXPANSION]
     assert kept[0].start_utc == _at(3)
     assert kept_markers == ()
+
+
+def test_feed_header_carries_last_bar_epoch_when_given() -> None:
+    """2026-09-19: the indicator stops an open-ended band at the last bar
+    the feed covers, read from this header field."""
+    states, bars = _resolution_scenario()
+    segments = build_regime_segments(states, bars)
+    lines = render_feed_lines(
+        segments, epoch_of=lambda dt: int(dt.timestamp()), generated_utc=_at(9),
+        last_bar_epoch=1234567890,
+    )
+    assert lines[0].endswith(" last_bar_epoch=1234567890")
+    lines = render_feed_lines(
+        segments, epoch_of=lambda dt: int(dt.timestamp()), generated_utc=_at(9)
+    )
+    assert "last_bar_epoch" not in lines[0]

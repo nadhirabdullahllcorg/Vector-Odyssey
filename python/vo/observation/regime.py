@@ -236,6 +236,14 @@ class RegimeState(CanonicalRecord):
     evidence: str
     supporting_features: tuple[RegimeFeature, ...] = ()
     anticipated_resolution: AnticipatedResolution | None = None
+    pivot_observed_at: datetime | None = None
+    """PULLBACK_UNRESOLVED only (additive, 2026-09-19): the open time of the
+    counter-swing's PIVOT bar -- where the pullback structurally began --
+    as opposed to `observed_at`, the bar on which the swing was K-bar
+    CONFIRMED and the pullback therefore became knowable. The gap between
+    the two is the confirmation lag every 'origin' lean score is bounded
+    by (see vo.telemetry.regime_validation); recorded so it is measured,
+    never inferred. None on every other regime and on older records."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -254,6 +262,15 @@ class RegimeState(CanonicalRecord):
         ):
             raise CanonicalRecordError(
                 "anticipated_resolution is only valid on a PULLBACK_UNRESOLVED state"
+            )
+        if self.pivot_observed_at is not None and self.regime is not RegimeType.PULLBACK_UNRESOLVED:
+            raise CanonicalRecordError(
+                "pivot_observed_at is only valid on a PULLBACK_UNRESOLVED state"
+            )
+        if self.pivot_observed_at is not None and self.pivot_observed_at > self.observed_at:
+            raise CanonicalRecordError(
+                "pivot_observed_at cannot be after observed_at (a pivot is confirmed later, "
+                "never earlier, than it formed)"
             )
 
 
@@ -481,7 +498,7 @@ class RegimeEngine:
                     self._defining_price = self._last_low.body_price
                 return []
             if swing.swing_type is SwingType.LOW:  # a pullback low formed
-                return self._enter_pullback(current, er)
+                return self._enter_pullback(current, er, swing)
         else:
             if self._is_lower_low(swing):
                 self._extreme_price = swing.body_price
@@ -489,7 +506,7 @@ class RegimeEngine:
                     self._defining_price = self._last_high.body_price
                 return []
             if swing.swing_type is SwingType.HIGH:
-                return self._enter_pullback(current, er)
+                return self._enter_pullback(current, er, swing)
         return []
 
     def _unresolved_swing(
@@ -563,7 +580,9 @@ class RegimeEngine:
         )
         return [state]
 
-    def _enter_pullback(self, current: Bar, er: float | None) -> list[RegimeState]:
+    def _enter_pullback(
+        self, current: Bar, er: float | None, swing: SwingPoint
+    ) -> list[RegimeState]:
         previous = self._regime
         self._regime = RegimeType.PULLBACK_UNRESOLVED
         lean = self._lean(current, er)
@@ -575,6 +594,7 @@ class RegimeEngine:
             evidence="counter-swing after expansion; retracement vs reversal not yet decidable",
             er=er,
             anticipated=lean,
+            pivot_observed_at=swing.observed_at,  # the pivot bar; `current` is the confirmation bar
         )
         self._unresolved = state
         self._emit_transition(
@@ -720,6 +740,7 @@ class RegimeEngine:
             er=er,
             anticipated=new_lean,
             supersedes=self._unresolved.object_id,
+            pivot_observed_at=self._unresolved.pivot_observed_at,
         )
         self._unresolved = refreshed
         return refreshed
@@ -767,6 +788,7 @@ class RegimeEngine:
         er: float | None,
         anticipated: AnticipatedResolution | None = None,
         supersedes: str | None = None,
+        pivot_observed_at: datetime | None = None,
     ) -> RegimeState:
         feature_list: list[RegimeFeature] = []
         if er is not None:
@@ -803,6 +825,7 @@ class RegimeEngine:
             evidence=evidence,
             supporting_features=features,
             anticipated_resolution=anticipated,
+            pivot_observed_at=pivot_observed_at,
         )
         self.states.append(state)
         return state

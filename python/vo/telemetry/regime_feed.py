@@ -420,8 +420,13 @@ def feed_header(
     session_stats: Sequence[SessionRegimeStats] = (),
     *,
     generated_utc: datetime,
+    last_bar_epoch: int | None = None,
 ) -> str:
-    """A single comment line the indicator skips -- provenance only."""
+    """A single comment line the indicator skips for drawing -- provenance,
+    plus `last_bar_epoch` (broker-server epoch of the last bar the engine
+    saw) so the indicator can stop an open-ended band at the last bar the
+    feed actually covers instead of stretching it to the live chart edge
+    -- a stale feed used to look like a live claim (2026-09-19)."""
     instrument = segments[0].instrument_key if segments else (
         markers[0].instrument_key if markers else "?"
     )
@@ -434,6 +439,7 @@ def feed_header(
         f"generated_utc={generated_utc.isoformat()} "
         f"segments={len(segments)} markers={len(markers)} boundaries={len(boundaries)} "
         f"session_stats={len(session_stats)}"
+        + (f" last_bar_epoch={last_bar_epoch}" if last_bar_epoch is not None else "")
     )
 
 
@@ -569,6 +575,7 @@ def render_feed_lines(
     *,
     epoch_of: Callable[[datetime], int],
     generated_utc: datetime,
+    last_bar_epoch: int | None = None,
 ) -> list[str]:
     """Full feed content: one provenance header, then one line per band,
     marker, or session boundary, in chronological order (interleaved by
@@ -582,7 +589,14 @@ def render_feed_lines(
     emits end_epoch 0.
     """
     lines = [
-        feed_header(segments, markers, boundaries, session_stats, generated_utc=generated_utc)
+        feed_header(
+            segments,
+            markers,
+            boundaries,
+            session_stats,
+            generated_utc=generated_utc,
+            last_bar_epoch=last_bar_epoch,
+        )
     ]
 
     events: list[tuple[datetime, str]] = []

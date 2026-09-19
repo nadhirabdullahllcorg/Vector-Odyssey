@@ -680,3 +680,28 @@ def test_rendered_transition_matrix_marks_structural_edges() -> None:
     )
     assert "1 (100%) †" in rendered
     assert "structural: 100% by state-machine design" in rendered
+
+
+def test_confirmation_lag_is_measured_from_pivot_observed_at() -> None:
+    """2026-09-19: a pullback record carries the pivot bar it structurally
+    began on; the report measures the K-bar confirmation lag from it."""
+    from dataclasses import replace as dc_replace
+
+    bars = tuple(_bar(_at(i)) for i in range(12))
+    origin = dc_replace(
+        _state(RegimeType.PULLBACK_UNRESOLVED, _at(5), anticipated=AnticipatedResolution.REVERSAL),
+        pivot_observed_at=_at(2),
+    )
+    resolution = _state(RegimeType.REVERSAL, _at(8), supersedes=origin.object_id)
+    accuracy = build_accuracy_validation((origin, resolution), bars=bars)
+    assert accuracy.confirmation_lag_bars is not None
+    med, p90, mx = accuracy.confirmation_lag_bars
+    assert med == 3.0 and p90 == 3.0 and mx == 3.0
+
+
+def test_confirmation_lag_is_none_when_no_record_carries_a_pivot() -> None:
+    origin = _state(
+        RegimeType.PULLBACK_UNRESOLVED, _at(0), anticipated=AnticipatedResolution.RETRACEMENT
+    )
+    resolution = _state(RegimeType.RETRACEMENT, _at(1), supersedes=origin.object_id)
+    assert build_accuracy_validation((origin, resolution)).confirmation_lag_bars is None

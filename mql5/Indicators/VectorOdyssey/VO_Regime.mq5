@@ -142,7 +142,7 @@
 // Build tag: shown in the indicator shortname and the on-chart status line
 // so a screenshot can prove WHICH compiled build is on the chart (a stale
 // .ex5 looks identical otherwise). Bump on every behavior change.
-#define VO_RGM_BUILD  "b37"
+#define VO_RGM_BUILD  "b38"
 #define VO_TAG_BAND "BAND"
 #define VO_TAG_MARK "MARK"
 #define VO_TAG_SSTAT "SSTAT"
@@ -157,6 +157,7 @@ input string InpFeedName       = "";              // blank = <symbol>_regime.fee
 
 input group "=== Refresh ==="
 input int    InpRefreshSeconds = 5;   // re-read the feed on this timer (publish_regime --watch interval)
+input int    InpStaleAfterMinutes = 15; // status line flags the feed STALE when its last bar is older than this
 
 input group "=== Regime band colors (Phase 13a convention) ==="
 input color  InpColorConsolidation = clrLightBlue;  // CONSOLIDATION -- light blue
@@ -190,6 +191,7 @@ input color  InpSessionStatsHeaderColor = clrSilver;
 //--- Re-read bookkeeping (same pattern as VO_Swings.mq5's g_last_seen_bar_open).
 datetime g_last_seen_bar_open = 0;
 string   g_last_feed_header  = "";  // last feed header drawn; "" forces a redraw
+datetime g_feed_last_bar     = 0;   // header last_bar_epoch: the last bar the feed covers (0 = unknown)
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -339,8 +341,18 @@ void VO_ReadAndDraw()
    if(header == g_last_feed_header && StringLen(header) > 0)
       return;
 
-   // The live edge a still-current (end_epoch 0) band is extended to.
-   const datetime live_edge = iTime(_Symbol, PERIOD_CURRENT, 0);
+   // An open-ended (end_epoch 0) band is extended only as far as the LAST
+   // BAR THE FEED COVERS (header last_bar_epoch), never to the live chart
+   // edge: a feed nobody has refreshed for hours must not look like a live
+   // claim about the bars since (2026-09-19). Older feeds without the
+   // field fall back to the live edge, as before.
+   g_feed_last_bar = 0;
+   const int lb_pos = StringFind(header, "last_bar_epoch=");
+   if(lb_pos >= 0)
+      g_feed_last_bar = (datetime)StringToInteger(StringSubstr(header, lb_pos + 15));
+   const datetime chart_edge = iTime(_Symbol, PERIOD_CURRENT, 0);
+   const datetime live_edge = (g_feed_last_bar > 0 && g_feed_last_bar < chart_edge)
+                              ? g_feed_last_bar : chart_edge;
 
    VO_DeleteAllRegimeObjects();
 
@@ -396,9 +408,17 @@ void VO_ReadAndDraw()
    if(InpShowSessionStats)
       VO_DrawSessionStatsPanel(sstat_rows, sstat_count);
 
+   string age_text = "feed age: unknown (no last_bar_epoch in header)";
+   if(g_feed_last_bar > 0)
+     {
+      const long age_min = ((long)TimeCurrent() - (long)g_feed_last_bar) / 60;
+      age_text = StringFormat("feed covers bars up to %s (%d min ago)",
+                              TimeToString(g_feed_last_bar, TIME_DATE | TIME_MINUTES), (int)age_min);
+      if(age_min > InpStaleAfterMinutes)
+         age_text = "STALE FEED -- " + age_text + " -- is publish_regime.py --watch running?";
+     }
    VO_DrawStatus(StringFormat("VO Regime %s | %s | %d bands, %d markers | %s",
-                              VO_RGM_BUILD, path, bands, marks,
-                              (StringLen(header) > 0) ? header : "(no header line)"));
+                              VO_RGM_BUILD, path, bands, marks, age_text));
   }
 
 //+------------------------------------------------------------------+

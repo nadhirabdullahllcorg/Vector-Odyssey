@@ -474,6 +474,7 @@ def main() -> None:
         report.per_session,
         epoch_of=epoch_of,
         generated_utc=datetime.now(UTC),
+        last_bar_epoch=broker_epoch_by_utc[history_end],
     )
     # Full-history feed gets its OWN file name (2026-09-18 audit, finding C3):
     # publish_regime.py --watch writes <symbol>_regime.feed from the live

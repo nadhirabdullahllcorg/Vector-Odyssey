@@ -234,6 +234,7 @@ def build_feed_lines(config: EAConfig) -> list[str]:
         session_stats,
         epoch_of=epoch_of,
         generated_utc=datetime.now(UTC),
+        last_bar_epoch=epoch_of(sequence.bars[-1].open_time_utc),
     )
     if trimmed_note:
         lines.insert(1, trimmed_note)  # a second '#' comment line; the indicator skips it

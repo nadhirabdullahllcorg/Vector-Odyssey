@@ -590,3 +590,44 @@ def test_defining_broken_requires_a_close_not_a_bare_wick():
         real_volume=0,
     )
     assert engine_down._defining_broken(real_break_down) is True
+
+
+# ── pivot_observed_at (2026-09-19, additive) ─────────────────────────
+
+
+def test_pivot_observed_at_only_valid_on_an_unresolved_state():
+    with pytest.raises(CanonicalRecordError, match="pivot_observed_at is only valid"):
+        _state(regime=RegimeType.EXPANSION, pivot_observed_at=_T0)
+
+
+def test_pivot_observed_at_cannot_be_after_the_record():
+    with pytest.raises(CanonicalRecordError, match="cannot be after"):
+        _state(
+            regime=RegimeType.PULLBACK_UNRESOLVED,
+            pivot_observed_at=_T0 + timedelta(minutes=1),
+        )
+
+
+def test_engine_records_the_pivot_bar_on_every_pullback_record():
+    """The pullback is recorded on the K-bar confirmation bar; the pivot it
+    structurally began on is carried alongside, including on lean-refresh
+    records, so the confirmation lag is measurable (regime_validation)."""
+    engine = _make_engine()
+    ReplayHarness(_rise_then_fall_sequence()).run(engine)
+    pullbacks = [s for s in engine.states.all() if s.regime is RegimeType.PULLBACK_UNRESOLVED]
+    assert pullbacks, "the tape should contain at least one pullback"
+    for state in pullbacks:
+        assert state.pivot_observed_at is not None
+        assert state.pivot_observed_at <= state.observed_at
+    others = [s for s in engine.states.all() if s.regime is not RegimeType.PULLBACK_UNRESOLVED]
+    assert all(s.pivot_observed_at is None for s in others)
+    # k=1 in this fixture: the ORIGIN record is confirmed exactly one bar
+    # after the pivot; refresh records keep the same pivot but are later.
+    by_id = {s.object_id: s for s in engine.states.all()}
+    origins = [
+        s for s in pullbacks
+        if s.supersedes is None or by_id[s.supersedes].regime is not RegimeType.PULLBACK_UNRESOLVED
+    ]
+    assert origins
+    for s in origins:
+        assert s.observed_at - s.pivot_observed_at == timedelta(minutes=1)  # type: ignore[operator]

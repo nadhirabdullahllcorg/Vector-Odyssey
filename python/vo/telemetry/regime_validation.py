@@ -395,6 +395,11 @@ class AccuracyValidation:
     by_pullback_duration_quartile_origin: tuple[AccuracySlice, ...] = ()
     """ORIGIN lean by how long the pullback ran -- the fixed-information-point
     version of by_pullback_duration_quartile."""
+    confirmation_lag_bars: tuple[float, float, float] | None = None
+    """(median, P90, max) bars between a pullback's pivot bar and the bar it
+    was confirmed/recorded on -- the swing engine's K-bar lag that bounds
+    every 'origin' score. From RegimeState.pivot_observed_at (2026-09-19);
+    None when no record carries it (older runs)."""
     confidence_is_constant: bool = False
     """True when every leaned pullback carried the same confidence value
     (RegimeEngine stamps 0.5 on every pullback record today), in which case
@@ -523,6 +528,23 @@ def build_accuracy_validation(
     confidence_values = {c for c, _m in confidence_pairs}
     confidence_is_constant = len(confidence_values) <= 1 and bool(confidence_pairs)
 
+    lags: list[float] = []
+    for chain in chains:
+        pivot = chain.origin.pivot_observed_at
+        if pivot is None:
+            continue
+        a = bar_index.get(pivot)
+        b = bar_index.get(chain.origin.observed_at)
+        if a is not None and b is not None:
+            lags.append(float(b - a))
+        else:
+            lags.append(
+                (chain.origin.observed_at - pivot).total_seconds() / 60.0 / minutes_per_bar
+            )
+    confirmation_lag = (
+        (percentile(lags, 50), percentile(lags, 90), max(lags)) if lags else None
+    )
+
     by_horizon = (
         score_lean_chains(chains, horizon_bars=0),
         *(
@@ -553,6 +575,7 @@ def build_accuracy_validation(
         by_horizon=by_horizon,
         by_pullback_duration_quartile_origin=_quartile_slices(duration_pairs_origin),
         confidence_is_constant=confidence_is_constant,
+        confirmation_lag_bars=confirmation_lag,
     )
 
 
@@ -882,6 +905,15 @@ def render_validation_report_markdown(
             f"{h.matched} | {rate_s} | {base_s} | {p_s} |"
         )
     lines.append("")
+    if a.confirmation_lag_bars is not None:
+        med, p90, mx = a.confirmation_lag_bars
+        lines.append(
+            f"Confirmation lag (pivot bar → recorded bar), measured from "
+            f"RegimeState.pivot_observed_at: median **{med:.0f}** bars, P90 {p90:.0f}, "
+            f"max {mx:.0f}. The origin row above is scored {med:.0f} bars (median) after the "
+            "pullback structurally began."
+        )
+        lines.append("")
     lines.append(
         "A rate BELOW the majority baseline at a horizon means always guessing that "
         "horizon's majority outcome would have done better than the lean. The origin "

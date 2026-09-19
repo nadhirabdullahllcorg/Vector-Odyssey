@@ -160,6 +160,14 @@ class HMMValidationReport:
     self_transition_displacement_ok: bool | None
     displacement_clustering_ok: bool | None
     accumulation_clustering_ok: bool | None
+    converged: bool | None = None
+    """hmmlearn's own monitor_.converged after fit -- None when the model
+    exposes no monitor (a fake in tests). A non-converged fit (EM hit
+    n_iter, or stalled on a tiny negative delta, which hmmlearn reports
+    as 'Model is not converging') is still a fit, but every number below
+    is then from an unfinished optimisation and the report says so
+    (2026-09-19: the first real 1M-bar run hit exactly this)."""
+    em_iterations: int | None = None
 
 
 def _in_killzone(when_utc: datetime, *, window_start: time, window_end: time) -> bool:
@@ -232,6 +240,8 @@ def train_hmm(
     n_states: int = DEFAULT_N_STATES,
     min_samples_per_state: int = DEFAULT_MIN_SAMPLES_PER_STATE,
     random_state: int = 42,
+    n_iter: int = 500,
+    tol: float = 1e-2,
 ) -> tuple[Any, tuple[int, ...]]:
     """
     Train the unsupervised Gaussian HMM on [norm_return, ER] and return
@@ -256,8 +266,18 @@ def train_hmm(
 
     GaussianHMM = _hmmlearn()
     x = [[s.norm_return, s.er] for s in samples]
+    # n_iter/tol (2026-09-19): the reference's n_iter=100 with hmmlearn's
+    # default tol=1e-2 stopped short on the real 131k-sample killzone run
+    # ("Model is not converging", a -0.22 log-likelihood step at iteration
+    # 100). 500 iterations is a ceiling, not a target -- EM stops early on
+    # its own once successive log-likelihood gains fall under `tol`; the
+    # fit's converged flag is carried into the report either way.
     model = GaussianHMM(
-        n_components=n_states, covariance_type="diag", n_iter=100, random_state=random_state
+        n_components=n_states,
+        covariance_type="diag",
+        n_iter=n_iter,
+        tol=tol,
+        random_state=random_state,
     )
     model.fit(x)
     states = tuple(int(v) for v in model.predict(x))
@@ -318,6 +338,18 @@ def build_state_profiles(
     return tuple(profiles)
 
 
+def _fit_converged(model: Any) -> bool | None:
+    monitor = getattr(model, "monitor_", None)
+    converged = getattr(monitor, "converged", None)
+    return bool(converged) if converged is not None else None
+
+
+def _fit_iterations(model: Any) -> int | None:
+    monitor = getattr(model, "monitor_", None)
+    iters = getattr(monitor, "iter", None)
+    return int(iters) if iters is not None else None
+
+
 def build_hmm_validation_report(
     *,
     instrument_key: str,
@@ -372,6 +404,8 @@ def build_hmm_validation_report(
         window_label=window_label,
         n_samples=len(samples),
         n_states=len(profiles),
+        converged=_fit_converged(model),
+        em_iterations=_fit_iterations(model),
         transition_matrix=transition_matrix,
         profiles=tuple(profiles),
         displacement_state=displacement_state,
@@ -401,6 +435,16 @@ def render_hmm_report_markdown(report: HMMValidationReport) -> str:
     lines.append(f"Window: {report.window_label}")
     lines.append(f"Samples: {report.n_samples}")
     lines.append(f"Hidden states: {report.n_states}")
+    if report.converged is None:
+        lines.append("EM convergence: not reported by this model")
+    elif report.converged:
+        lines.append(f"EM convergence: converged after {report.em_iterations} iterations")
+    else:
+        lines.append(
+            f"**EM convergence: NOT CONVERGED after {report.em_iterations} iterations -- every "
+            "figure below comes from an unfinished optimisation. Raise n_iter, loosen tol, "
+            "or reconsider n_states before reading anything into the state profiles.**"
+        )
     lines.append("")
     lines.append(
         "Phase 17a `IHMMEngine`, `[VO-H]` by construction (see this module's "
