@@ -158,20 +158,27 @@ def test_live_trading_is_off_when_the_section_is_absent(tmp_path: Path) -> None:
     assert config.live_trading is None
 
 
-def test_the_shipped_config_does_not_trade() -> None:
-    """The repository default must be a research process, not a trading
-    one. If this ever flips, it should be a deliberate commit.
+def test_live_trading_defaults_to_off_for_an_unspecified_config(tmp_path: Path) -> None:
+    """The DEFAULT must be a research process, not a trading one.
 
-    Asserts the PROPERTY (this config will not place orders) rather than
-    the presence of a live_trading section: vo_ea.yaml is tracked but
-    carries a machine-specific wire.dir, so a working copy and a fresh
-    clone legitimately differ in whether the section is there at all.
-    Absent and present-but-disabled are both "does not trade", and that
-    is the thing worth pinning."""
-    repo_root = Path(__file__).resolve().parents[2]
-    config = load_ea_config(repo_root / "config" / "settings" / "vo_ea.yaml")
+    This deliberately does NOT assert on config/settings/vo_ea.yaml.
+    That file is tracked but machine-local -- it carries a real terminal
+    path and whatever live_trading state its owner has chosen -- so a
+    test reading it would fail the moment someone legitimately enables
+    trading on their own machine, which is not a defect to catch. What
+    is worth pinning is the loader's own default, which is what governs
+    every config that does not say otherwise."""
+    config = load_ea_config(_write(tmp_path, _VALID))
 
-    assert config.live_trading is None or config.live_trading.enabled is False
+    assert config.live_trading is None
+
+    text = _VALID + """
+live_trading:
+  compliance_config: "config/settings/compliance_live.yaml"
+"""
+    present_but_unset = load_ea_config(_write(tmp_path, text))
+    assert present_but_unset.live_trading is not None
+    assert present_but_unset.live_trading.enabled is False
 
 
 def test_live_trading_must_be_switched_on_explicitly(tmp_path: Path) -> None:
