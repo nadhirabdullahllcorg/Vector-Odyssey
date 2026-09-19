@@ -27,6 +27,7 @@ this config on a real evaluation account.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,31 @@ class ComplianceConfigError(ValueError):
     pass
 
 
+class DailyLossMode(Enum):
+    """How the DAILY gate decides it has been breached.
+
+    FIXED is the prop-firm shape and the default: the day is over once
+    losses from the trading day's start equity reach their own limit,
+    independent of how much total-drawdown headroom remains. A firm
+    imposes this as a rule of its own, so it is enforced as one.
+
+    DRAWDOWN_HEADROOM is for an account with no external daily rule --
+    a personal live account, where the only real constraint is the max
+    drawdown. The day is halted not at a fixed daily loss, but once the
+    TOTAL drawdown has consumed `daily_halt_at_total_usage` of its
+    buffer-adjusted allowance: stop trading while there is still room
+    left, rather than at an arbitrary daily figure. `daily_loss_
+    limit_fraction` stays configured and stays REPORTED on every verdict
+    in this mode (it is useful telemetry), it simply does not gate.
+    """
+
+    FIXED = "FIXED"
+    DRAWDOWN_HEADROOM = "DRAWDOWN_HEADROOM"
+
+    def __str__(self) -> str:
+        return self.value
+
+
 @dataclass(frozen=True)
 class ComplianceConfig:
     version: int
@@ -45,6 +71,12 @@ class ComplianceConfig:
     safety_buffer_fraction: float
     warning_threshold_fraction: float
     critical_threshold_fraction: float
+    daily_loss_mode: DailyLossMode = DailyLossMode.FIXED
+    # Only read in DRAWDOWN_HEADROOM mode: the fraction of the
+    # buffer-adjusted TOTAL drawdown allowance that, once consumed, halts
+    # the day. Additive with a default so every existing ComplianceConfig
+    # construction site (prop defaults, every test) is unchanged.
+    daily_halt_at_total_usage: float = 0.75
 
     def __post_init__(self) -> None:
         if not (0.0 < self.daily_loss_limit_fraction <= 1.0):
@@ -71,6 +103,11 @@ class ComplianceConfig:
             raise ComplianceConfigError(
                 "warning_threshold_fraction must be < critical_threshold_fraction, "
                 "and both must be in (0, 1)"
+            )
+        if not (0.0 < self.daily_halt_at_total_usage <= 1.0):
+            raise ComplianceConfigError(
+                f"daily_halt_at_total_usage must be in (0, 1], got "
+                f"{self.daily_halt_at_total_usage}"
             )
 
     @property
@@ -113,6 +150,15 @@ def load_compliance_config(path: str | Path) -> ComplianceConfig:
         if key not in top:
             raise ComplianceConfigError(f"compliance config requires '{key}'")
 
+    raw_mode = str(top.get("daily_loss_mode", DailyLossMode.FIXED.value)).upper()
+    try:
+        daily_loss_mode = DailyLossMode(raw_mode)
+    except ValueError as exc:
+        raise ComplianceConfigError(
+            f"daily_loss_mode must be one of "
+            f"{sorted(m.value for m in DailyLossMode)}, got {raw_mode!r}"
+        ) from exc
+
     return ComplianceConfig(
         version=int(top["version"]),
         daily_loss_limit_fraction=float(top["daily_loss_limit_fraction"]),
@@ -120,4 +166,6 @@ def load_compliance_config(path: str | Path) -> ComplianceConfig:
         safety_buffer_fraction=float(top["safety_buffer_fraction"]),
         warning_threshold_fraction=float(top["warning_threshold_fraction"]),
         critical_threshold_fraction=float(top["critical_threshold_fraction"]),
+        daily_loss_mode=daily_loss_mode,
+        daily_halt_at_total_usage=float(top.get("daily_halt_at_total_usage", 0.75)),
     )

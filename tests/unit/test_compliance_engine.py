@@ -10,7 +10,11 @@ from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
-from vo.compliance.compliance_config import ComplianceConfig, ComplianceConfigError
+from vo.compliance.compliance_config import (
+    ComplianceConfig,
+    ComplianceConfigError,
+    DailyLossMode,
+)
 from vo.compliance.engine import ComplianceEngine, approve_trade
 from vo.compliance.news_gate import NewsGateConfig
 from vo.interfaces.compliance import (
@@ -25,6 +29,7 @@ from vo.interfaces.signals import TradeSignal
 from vo.market.account import AccountState
 
 _TRADING_DAY_OPENS = time(18, 0)
+_GENERATED_AT = datetime(2026, 9, 21, 14, 0, tzinfo=UTC)
 
 
 def _config(**overrides: float) -> ComplianceConfig:
@@ -384,3 +389,104 @@ def test_approve_trade_raises_on_a_blocked_verdict() -> None:
     )
     with pytest.raises(ComplianceApprovalError):
         approve_trade(breached, _trade_signal(), object_id="A1")
+
+
+# ── DailyLossMode.DRAWDOWN_HEADROOM: the live personal account ─────────────
+#
+# The user's own instruction (2026-09-19): "for live account only have
+# daily risk breach when drawdown is reaching close to breach and max
+# draw down 20%". There is no prop firm imposing a daily rule on that
+# account, so the day halts on total-drawdown headroom instead.
+
+
+def _live_config(**overrides: object) -> ComplianceConfig:
+    base: dict[str, object] = dict(
+        version=1,
+        daily_loss_limit_fraction=0.05,
+        total_drawdown_limit_fraction=0.20,
+        safety_buffer_fraction=0.005,
+        warning_threshold_fraction=0.70,
+        critical_threshold_fraction=0.90,
+        daily_loss_mode=DailyLossMode.DRAWDOWN_HEADROOM,
+        daily_halt_at_total_usage=0.75,
+    )
+    base.update(overrides)
+    return ComplianceConfig(**base)  # type: ignore[arg-type]
+
+
+def test_headroom_mode_ignores_a_daily_loss_that_would_breach_a_prop_account() -> None:
+    """A 6% day is past the 5% daily figure, but total drawdown has barely
+    moved -- on this account that is not a reason to stop."""
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    now_ny = datetime(2026, 9, 21, 10, 0)
+
+    engine.on_snapshot(
+        object_id="v1", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(100_000.0)
+    )
+    verdict = engine.on_snapshot(
+        object_id="v2", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(94_000.0)
+    )
+
+    assert verdict.status is not ComplianceStatus.BREACHED_DAILY
+    assert verdict.allowed is True
+    # The daily figure is still reported -- it just does not gate.
+    assert verdict.daily_loss_used_fraction > 1.0
+
+
+def test_headroom_mode_halts_the_day_once_drawdown_nears_the_breach() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    now_ny = datetime(2026, 9, 21, 10, 0)
+
+    engine.on_snapshot(
+        object_id="v1", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(100_000.0)
+    )
+    # Enforced allowance is 19.5%; 75% of that is ~14.6% drawdown.
+    verdict = engine.on_snapshot(
+        object_id="v2", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(85_000.0)
+    )
+
+    assert verdict.status is ComplianceStatus.BREACHED_DAILY
+    assert verdict.allowed is False
+    assert verdict.reason is not None
+    assert "headroom left" in verdict.reason
+
+
+def test_headroom_mode_still_breaches_total_at_the_real_limit() -> None:
+    """The 20% max drawdown is still the hard stop, and it is still
+    permanent."""
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    now_ny = datetime(2026, 9, 21, 10, 0)
+
+    engine.on_snapshot(
+        object_id="v1", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(100_000.0)
+    )
+    verdict = engine.on_snapshot(
+        object_id="v2", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(80_000.0)
+    )
+
+    assert verdict.status is ComplianceStatus.BREACHED_TOTAL
+    assert verdict.allowed is False
+
+
+def test_fixed_mode_is_unchanged_and_is_the_default() -> None:
+    """Every existing prop-shaped config keeps its exact behavior."""
+    config = ComplianceConfig(
+        version=1,
+        daily_loss_limit_fraction=0.05,
+        total_drawdown_limit_fraction=0.10,
+        safety_buffer_fraction=0.005,
+        warning_threshold_fraction=0.70,
+        critical_threshold_fraction=0.90,
+    )
+    assert config.daily_loss_mode is DailyLossMode.FIXED
+
+    engine = ComplianceEngine(config=config, trading_day_opens=_TRADING_DAY_OPENS)
+    now_ny = datetime(2026, 9, 21, 10, 0)
+    engine.on_snapshot(
+        object_id="v1", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(100_000.0)
+    )
+    verdict = engine.on_snapshot(
+        object_id="v2", generated_at_utc=_GENERATED_AT, now_ny=now_ny, account=_account(95_400.0)
+    )
+
+    assert verdict.status is ComplianceStatus.BREACHED_DAILY

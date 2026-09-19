@@ -1,0 +1,57 @@
+# config/settings/compliance_live.yaml      versioned
+#
+# THE LIVE PERSONAL ACCOUNT's compliance profile, as distinct from
+# compliance.yaml, which carries the prop-firm-shaped defaults taken from
+# the PropFirmGuard reference. Both are loaded by the same
+# load_compliance_config(path); which file a process reads is a wiring
+# choice, not a code change.
+#
+# These numbers come from the user directly (2026-09-19), not from a
+# reference implementation:
+#
+#   "for live account only have daily risk breach when drawdown is
+#    reaching close to breach and max draw down 20% and its only allowed
+#    to be in one trade at a time"
+#
+# Three things follow from that, and each is recorded where it belongs:
+#
+#   1. Max drawdown 20%              -> total_drawdown_limit_fraction below.
+#   2. No independent daily figure   -> daily_loss_mode: DRAWDOWN_HEADROOM.
+#      There is no prop firm imposing a daily rule on this account, so the
+#      day halts when the TOTAL drawdown gets close to breaching, not at
+#      an arbitrary daily loss. See DailyLossMode's own docstring.
+#   3. One trade at a time           -> risk.yaml's max_open_positions: 1,
+#      which is ALREADY set there and needs no change. Position count is
+#      the risk manager's concern, not this file's -- compliance bounds
+#      the account, risk bounds the trade.
+version: 1
+
+# Informational in DRAWDOWN_HEADROOM mode -- still computed and reported
+# on every verdict (daily_loss_used_fraction), but it does not gate.
+# Kept at a realistic figure so the telemetry stays meaningful.
+daily_loss_limit_fraction: 0.05
+
+# The real constraint on this account: 20%.
+total_drawdown_limit_fraction: 0.20
+
+# Subtracted from the limit before it is enforced, so the engine
+# intervenes before 20% is actually touched. Enforced limit = 19.5%.
+safety_buffer_fraction: 0.005
+
+# Staging only; never blocks on its own.
+warning_threshold_fraction: 0.70
+critical_threshold_fraction: 0.90
+
+# DRAWDOWN_HEADROOM: the day is over once total drawdown has consumed
+# this share of its buffer-adjusted allowance.
+daily_loss_mode: DRAWDOWN_HEADROOM
+
+# 0.75 of a 19.5% enforced allowance halts the day at ~14.6% drawdown,
+# leaving ~5% of headroom unspent for the next session to work with.
+#
+# NOT CONFIRMED WITH THE USER -- "close to breach" was the instruction,
+# and this is one honest reading of it. Raising it toward 0.90 halts
+# later and leaves less room; lowering it toward 0.50 stops the day
+# earlier and is the more conservative read. Change this number, not the
+# engine, if it should sit elsewhere.
+daily_halt_at_total_usage: 0.75

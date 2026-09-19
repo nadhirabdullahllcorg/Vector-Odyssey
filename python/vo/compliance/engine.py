@@ -79,7 +79,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime, time
 
-from vo.compliance.compliance_config import ComplianceConfig
+from vo.compliance.compliance_config import ComplianceConfig, DailyLossMode
 from vo.compliance.news_gate import NewsGateConfig, evaluate_news_blackout
 from vo.compliance.state_store import (
     CURRENT_STATE_VERSION,
@@ -173,6 +173,22 @@ class ComplianceEngine:
             saved_at_utc=saved_at_utc,
         )
 
+    def _daily_breached(
+        self, *, daily_loss_fraction: float, daily_limit: float, total_used: float
+    ) -> bool:
+        """Whether the DAY is over, by whichever rule this account runs
+        under -- see vo.compliance.compliance_config.DailyLossMode.
+
+        FIXED (prop): a fixed daily loss from day-start equity.
+        DRAWDOWN_HEADROOM (personal live): no daily figure of its own;
+        the day halts once the TOTAL drawdown has eaten the configured
+        share of its allowance, so trading stops while headroom remains
+        rather than at an arbitrary daily number.
+        """
+        if self._config.daily_loss_mode is DailyLossMode.DRAWDOWN_HEADROOM:
+            return total_used >= self._config.daily_halt_at_total_usage
+        return daily_loss_fraction >= daily_limit
+
     def on_snapshot(
         self,
         *,
@@ -231,16 +247,29 @@ class ComplianceEngine:
                 f"{self._config.safety_buffer_fraction:.2%} buffer) -- permanently blocked"
             )
             active_news_event = None
-        elif daily_loss_fraction >= daily_limit:
+        elif self._daily_breached(
+            daily_loss_fraction=daily_loss_fraction,
+            daily_limit=daily_limit,
+            total_used=total_used,
+        ):
             status = ComplianceStatus.BREACHED_DAILY
             allowed = False
-            reason = (
-                f"daily loss {daily_loss_fraction:.2%} has reached/exceeded the "
-                f"buffer-adjusted limit {daily_limit:.2%} (configured "
-                f"{self._config.daily_loss_limit_fraction:.2%} minus "
-                f"{self._config.safety_buffer_fraction:.2%} buffer) -- blocked until "
-                f"the next trading day"
-            )
+            if self._config.daily_loss_mode is DailyLossMode.DRAWDOWN_HEADROOM:
+                reason = (
+                    f"total drawdown has consumed {total_used:.1%} of its "
+                    f"buffer-adjusted allowance ({total_limit:.2%}), at or past the "
+                    f"{self._config.daily_halt_at_total_usage:.0%} halt point -- "
+                    f"blocked until the next trading day, with headroom left "
+                    f"deliberately unspent"
+                )
+            else:
+                reason = (
+                    f"daily loss {daily_loss_fraction:.2%} has reached/exceeded the "
+                    f"buffer-adjusted limit {daily_limit:.2%} (configured "
+                    f"{self._config.daily_loss_limit_fraction:.2%} minus "
+                    f"{self._config.safety_buffer_fraction:.2%} buffer) -- blocked until "
+                    f"the next trading day"
+                )
             active_news_event = None
         else:
             news_verdict = (
