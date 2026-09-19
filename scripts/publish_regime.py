@@ -3,7 +3,14 @@
 Publish a regime feed for VO_ReferenceLevels.mq5 -- Phase 13a (Python computes,
 the indicator reads a file).
 
-    python scripts/publish_regime.py [config/settings/vo_ea.yaml] [--watch]
+    python scripts/publish_regime.py [config/settings/vo_ea.yaml] [--watch] [--tier INTERNAL|SWING]
+
+--tier overrides config/settings/regime.yaml's `tier` for THIS PUBLISH ONLY
+(chart exploration, 2026-09-19): the feed is written to
+<symbol>_regime_<tier>.feed (e.g. US100_regime_internal.feed) so it never
+replaces the configured-tier feed, and the header names the override.
+regime.yaml itself is untouched -- the versioned classifier config only
+changes through a version bump, never a command-line flag.
 
 WHAT IT DOES. Reads the same wire files VO_Bridge.mq5 writes (the
 <broker_symbol>_bars.jsonl / _meta.jsonl the running VO_EA already
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,6 +61,7 @@ from vo.market.sequence import BarSequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
+from vo.observation.swings import SwingLevel  # noqa: E402
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
     build_regime_segments,
@@ -157,7 +166,7 @@ def _build_sequence(
     return sequence, broker_epoch_by_utc
 
 
-def build_feed_lines(config: EAConfig) -> list[str]:
+def build_feed_lines(config: EAConfig, *, tier_override: SwingLevel | None = None) -> list[str]:
     """Run the real RegimeEngine over the wire bars and return the feed
     content (importable directly so tests never re-implement the wiring)."""
     profiles = load_broker_profiles(config.brokers_path)
@@ -168,6 +177,8 @@ def build_feed_lines(config: EAConfig) -> list[str]:
     tick_size = _load_tick_size(config.meta_wire_path())
     swing_config = load_swing_config(SWINGS_CONFIG_PATH)
     regime_config = load_regime_config(REGIME_CONFIG_PATH)
+    if tier_override is not None and tier_override is not regime_config.tier:
+        regime_config = replace(regime_config, tier=tier_override)
 
     engine = build_regime_engine(regime_config, swing_config, tick_size=tick_size)
     ReplayHarness(sequence).run(engine)
@@ -238,16 +249,23 @@ def build_feed_lines(config: EAConfig) -> list[str]:
     )
     if trimmed_note:
         lines.insert(1, trimmed_note)  # a second '#' comment line; the indicator skips it
+    if tier_override is not None:
+        lines.insert(
+            1,
+            f"# tier_override={tier_override.name} (regime.yaml tier unchanged; exploration feed)",
+        )
     return lines
 
 
-def _feed_path(config: EAConfig) -> Path:
+def _feed_path(config: EAConfig, tier_override: SwingLevel | None = None) -> Path:
+    if tier_override is not None:
+        return config.wire.dir / f"{config.broker_symbol}_regime_{tier_override.name.lower()}.feed"
     return config.wire.dir / f"{config.broker_symbol}_regime.feed"
 
 
-def publish_once(config: EAConfig) -> int:
-    lines = build_feed_lines(config)
-    out_path = _feed_path(config)
+def publish_once(config: EAConfig, *, tier_override: SwingLevel | None = None) -> int:
+    lines = build_feed_lines(config, tier_override=tier_override)
+    out_path = _feed_path(config, tier_override)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic-ish replace: write a temp then rename, so VO_ReferenceLevels.mq5 never
     # reads a half-written feed.
@@ -276,23 +294,47 @@ def publish_once(config: EAConfig) -> int:
     return max(len(lines) - header_lines, 0)  # bands + markers + session lines
 
 
+def _parse_tier(argv: list[str]) -> tuple[list[str], SwingLevel | None]:
+    """Pull `--tier NAME` out of argv; returns the remaining args and the
+    override (None when absent)."""
+    if "--tier" not in argv:
+        return argv, None
+    i = argv.index("--tier")
+    if i + 1 >= len(argv):
+        raise SystemExit("--tier needs a value: INTERNAL or SWING")
+    name = argv[i + 1].upper()
+    try:
+        tier = SwingLevel[name]
+    except KeyError as exc:
+        raise SystemExit(f"--tier must be INTERNAL or SWING, got {argv[i + 1]!r}") from exc
+    return argv[:i] + argv[i + 2 :], tier
+
+
 def main() -> None:
     argv = [a for a in sys.argv[1:] if a != "--watch"]
     watch = "--watch" in sys.argv
+    argv, tier_override = _parse_tier(argv)
     config_path = argv[0] if argv else "config/settings/vo_ea.yaml"
     config = load_ea_config(config_path)
+    if tier_override is not None:
+        print(
+            f"tier override: {tier_override.name} (exploration feed "
+            f"{_feed_path(config, tier_override).name}; regime.yaml untouched)"
+        )
 
     if not watch:
-        count = publish_once(config)
+        count = publish_once(config, tier_override=tier_override)
         events_desc = "bands + markers + session lines"
-        print(f"wrote {count} regime events ({events_desc}) to {_feed_path(config)}")
+        print(
+            f"wrote {count} regime events ({events_desc}) to {_feed_path(config, tier_override)}"
+        )
         return
 
     print(f"watching {config.bar_wire_path()} -- publishing regime feed (Ctrl+C to stop)")
     try:
         while True:
             try:
-                count = publish_once(config)
+                count = publish_once(config, tier_override=tier_override)
                 print(f"{datetime.now(UTC).isoformat()} wrote {count} regime events")
             except PermissionError as exc:
                 # A stubborn file lock this cycle -- keep the watcher alive.
