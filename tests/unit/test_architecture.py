@@ -467,6 +467,8 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.market.mt5",
         "vo.observation.efficiency_ratio",
         "vo.observation.entry_timing",
+        "vo.research.fbm",
+        "vo.research.hurst_validation",
         "vo.observation.hurst",
         "vo.observation.regime",
         "vo.observation.regime_config",

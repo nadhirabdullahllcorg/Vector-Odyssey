@@ -24,8 +24,21 @@ methodology_version get formalized; this is the least that lets Phase 13
 cite Hurst as evidence today. Like ER, it is INSTRUMENTATION -- it never
 classifies the regime and never reaches a trade decision (G2).
 
+CALIBRATION (2026-09-19, vo.research.hurst_validation against
+known-H synthetic fBm, 120 trials per cell). This estimator READS LOW,
+consistently, across the whole range -- a true H of 0.5 reads about
+0.43, 0.3 reads about 0.26, 0.7 reads about 0.63. So the textbook
+reading of 0.5 as the random-walk midpoint is WRONG FOR THIS ESTIMATOR:
+compare against HURST_RANDOM_WALK_REFERENCE below instead. Ordering is
+monotonic at every window tested, so a comparison between two readings
+is trustworthy even where the absolute level is not.
+
+The bias is what makes the estimator usable despite being biased: it is
+consistent, so it shifts the scale rather than distorting it.
+
 No lookahead: reads only bars[<= index].
 """
+
 
 from __future__ import annotations
 
@@ -33,6 +46,17 @@ import math
 from collections.abc import Sequence
 
 from vo.market.bar import Bar
+
+HURST_RANDOM_WALK_REFERENCE = 0.44
+"""What this estimator reads on a series with NO memory (true H = 0.5).
+
+Use this, not 0.5, as the neutral point. Measured twice by independent
+routes: the 2026-09-18 audit (B1) against a plain random walk, and the
+2026-09-19 fBm calibration, which put it at 0.428-0.441 across windows
+from 64 to 512. A reading below this is evidence of mean reversion; above
+it, of persistence. Reading against 0.5 instead would classify ordinary
+random behaviour as mean-reverting, which is exactly the error the v34
+report made."""
 
 
 def hurst_exponent(

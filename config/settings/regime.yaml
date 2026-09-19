@@ -22,7 +22,7 @@
 # trusted again. build_regime_engine() (regime_config.py) now defaults
 # methodology_version from this field -- previously it silently ignored
 # it and always stamped a bare 1, a latent gap fixed the same day.
-version: 3
+version: 4
 
 # v3 (2026-09-18): efficiency_ratio_period bumped 10 -> 14 bars. Confirmed the
 # same day via a user-supplied quant-trading reference (Kaufman ER/ATR/Hurst/
@@ -42,7 +42,37 @@ version: 3
 tier: SWING
 
 efficiency_ratio_period: 14   # bars; Kaufman ER window (vo.observation.efficiency_ratio) -- v3
-hurst_period: 20              # bars; structure-function Hurst window (vo.observation.hurst)
+# v4 (2026-09-19): hurst_period 20 -> 128, SELECTED FROM MEASUREMENT, not
+# guessed. vo.research.hurst_validation ran the real estimator against
+# synthetic fractional Brownian motion of known H (vo.research.fbm,
+# Hosking's exact method), 120 trials per cell:
+#
+#   window | H=0.3 | H=0.5 | H=0.7 | sd@0.5 | separation(0.3 vs 0.7)
+#       64 | 0.246 | 0.436 | 0.581 |  0.187 | 1.87 pooled SD
+#      128 | 0.255 | 0.428 | 0.627 |  0.149 | 2.69
+#      256 | 0.261 | 0.439 | 0.627 |  0.155 | 2.61
+#      512 | 0.258 | 0.441 | 0.621 |  0.153 | 2.73
+#
+# Separation and spread both plateau at 128 -- 256 and 512 cost four and
+# sixteen times the warmup for no measurable gain. At the old 20 bars the
+# spread at H=0.5 was ~0.30, meaning a single reading of 0.45 carried a
+# +/-0.3 uncertainty and could honestly have been 0.15 or 0.75. That is
+# the quantitative form of "20 bars is noise".
+#
+# Ordering is monotonic at every window tested, so no previously reported
+# Hurst conclusion was INVERTED -- they were just far noisier than their
+# precision implied.
+#
+# AT M1 THIS IS A SEMANTIC CHANGE, not only a precision one: 128 bars is
+# ~2h08 of market time, so Hurst now reads at session scale rather than
+# locally. Expect it to move more slowly and to stop tracking short
+# swings. That is the intended behaviour of a Hurst estimate; the old
+# window was measuring something closer to noise than to memory.
+#
+# Every Hurst-conditioned report section (validation terciles, the Markov
+# conditioning, HMM features, phase agreement) was computed at 20 bars and
+# needs regenerating before it can be read again.
+hurst_period: 128             # bars; structure-function Hurst window (vo.observation.hurst) -- v4
 
 # [VO-H] anticipation lean thresholds (only affect the recorded lean on a
 # PULLBACK_UNRESOLVED state, never the state itself). Fibonacci-flavoured
