@@ -146,3 +146,86 @@ def test_non_positive_poll_interval_raises(tmp_path: Path) -> None:
     """
     with pytest.raises(EAConfigError):
         load_ea_config(_write(tmp_path, text))
+
+
+# ── live trading: the switch that lets a process place real orders ────────
+
+
+def test_live_trading_is_off_when_the_section_is_absent(tmp_path: Path) -> None:
+    """A config that never mentions live trading must never trade."""
+    config = load_ea_config(_write(tmp_path, _VALID))
+
+    assert config.live_trading is None
+
+
+def test_the_shipped_config_ships_with_live_trading_disabled() -> None:
+    """The repository default must be a research process, not a trading
+    one. If this ever flips, it should be a deliberate commit."""
+    repo_root = Path(__file__).resolve().parents[2]
+    config = load_ea_config(repo_root / "config" / "settings" / "vo_ea.yaml")
+
+    assert config.live_trading is not None
+    assert config.live_trading.enabled is False
+
+
+def test_live_trading_must_be_switched_on_explicitly(tmp_path: Path) -> None:
+    """Present-but-unset is off. There is no enabled-by-presence."""
+    text = _VALID + """
+live_trading:
+  execution_config: "config/settings/execution.yaml"
+"""
+    config = load_ea_config(_write(tmp_path, text))
+
+    assert config.live_trading is not None
+    assert config.live_trading.enabled is False
+
+
+def test_live_trading_reads_its_paths_and_preflight_sizing(tmp_path: Path) -> None:
+    text = _VALID + """
+live_trading:
+  enabled: true
+  compliance_config: "config/settings/compliance_live.yaml"
+  compliance_state: "logs/compliance_state.json"
+  trading_day_opens: "18:00"
+  preflight_volume: 0.02
+"""
+    live = load_ea_config(_write(tmp_path, text)).live_trading
+
+    assert live is not None
+    assert live.enabled is True
+    assert live.compliance_config_path == Path("config/settings/compliance_live.yaml")
+    assert live.compliance_state_path == Path("logs/compliance_state.json")
+    assert live.trading_day_opens.hour == 18
+    assert live.preflight_volume == 0.02
+
+
+def test_a_preflight_trail_that_does_not_tighten_is_refused(tmp_path: Path) -> None:
+    """A trail step of zero would 'pass' without proving the primitive
+    works -- the exact commissioning theatre preflight exists to avoid."""
+    text = _VALID + """
+live_trading:
+  enabled: true
+  preflight_trail_improvement: 0
+"""
+    with pytest.raises(EAConfigError, match="does not tighten"):
+        load_ea_config(_write(tmp_path, text))
+
+
+def test_a_nonsense_preflight_volume_is_refused(tmp_path: Path) -> None:
+    text = _VALID + """
+live_trading:
+  enabled: true
+  preflight_volume: 0
+"""
+    with pytest.raises(EAConfigError, match="preflight_volume"):
+        load_ea_config(_write(tmp_path, text))
+
+
+def test_a_malformed_trading_day_open_is_refused(tmp_path: Path) -> None:
+    text = _VALID + """
+live_trading:
+  enabled: true
+  trading_day_opens: "six pm"
+"""
+    with pytest.raises(EAConfigError, match="trading_day_opens"):
+        load_ea_config(_write(tmp_path, text))

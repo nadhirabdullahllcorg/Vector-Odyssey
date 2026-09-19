@@ -492,6 +492,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.valco.lrx_gates",
         "vo.telemetry.benchmark",
         "vo.telemetry.live_dispatch",
+        "vo.telemetry.live_wiring",
         "vo.interfaces.economic_events",
         "vo.market.economic_calendar_ingestion",
         "vo.core.mt5",

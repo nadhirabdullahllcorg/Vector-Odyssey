@@ -59,6 +59,7 @@ from vo.market.economic_calendar_ingestion import (
 )
 from vo.market.ingestion import JsonlTailer
 from vo.telemetry.live_dispatch import DispatchResult, LiveDispatcher
+from vo.telemetry.live_wiring import build_live_dispatcher, describe_live_configuration
 from vo.telemetry.publisher import RuntimeStatePublisher
 from vo.telemetry.state import CURRENT_SCHEMA_VERSION, ConnectionStatus, RuntimeState
 from vo.telemetry.trade_pipeline import (
@@ -306,9 +307,22 @@ class VOEaRuntime:
 
 
 def build_runtime(config: EAConfig) -> VOEaRuntime:
+    """Assemble one process from its config.
+
+    The dispatcher is built from the same config and is None unless
+    live_trading.enabled is true, so this function returns a
+    research-only runtime by default and a trading one only when someone
+    has explicitly said so. The choice is logged either way -- what a
+    process is about to do should be visible before it does it."""
     broker_profiles = load_broker_profiles(config.brokers_path)
     session_configs = load_session_configs(config.sessions_path)
-    return VOEaRuntime(config, broker_profiles, session_configs)
+
+    logger.info("%s", describe_live_configuration(config))
+    dispatcher = build_live_dispatcher(config)
+
+    return VOEaRuntime(
+        config, broker_profiles, session_configs, dispatcher=dispatcher
+    )
 
 
 async def run_vo_ea(config: EAConfig) -> None:
