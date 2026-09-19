@@ -62,6 +62,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from vo.interfaces.economic_events import EconomicEvent
+
 
 class ComplianceApprovalError(ValueError):
     """Raised when a ComplianceVerdict or ComplianceApproval is
@@ -83,13 +85,27 @@ class ComplianceStatus(Enum):
     CRITICAL = "CRITICAL"
     BREACHED_DAILY = "BREACHED_DAILY"
     BREACHED_TOTAL = "BREACHED_TOTAL"
+    NEWS_BLACKOUT = "NEWS_BLACKOUT"
+    """Added v1.1 (2026-09-19, additive -- same convention as
+    Decision.SIGNAL_PROPOSED): a qualifying economic event is inside its
+    configured before/during/after blackout window (vo.compliance.
+    news_gate). Blocking, but distinct from BREACHED_DAILY/BREACHED_TOTAL
+    -- it is temporary by construction (the window always ends) and says
+    nothing about the account's own loss/drawdown state."""
 
     def __str__(self) -> str:
         return self.value
 
 
-# A BREACHED status blocks new trades; SAFE/WARNING/CRITICAL do not.
-_BLOCKING_STATUSES = frozenset({ComplianceStatus.BREACHED_DAILY, ComplianceStatus.BREACHED_TOTAL})
+# A BREACHED_*/NEWS_BLACKOUT status blocks new trades; SAFE/WARNING/
+# CRITICAL do not.
+_BLOCKING_STATUSES = frozenset(
+    {
+        ComplianceStatus.BREACHED_DAILY,
+        ComplianceStatus.BREACHED_TOTAL,
+        ComplianceStatus.NEWS_BLACKOUT,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +133,11 @@ class ComplianceVerdict:
     total_drawdown_used_fraction: float
     """Drawdown from peak equity, as a fraction of the buffer-adjusted
     total-drawdown limit (same 1.0 convention as above)."""
+    active_news_event: EconomicEvent | None = None
+    """Set exactly when status is NEWS_BLACKOUT (vo.compliance.news_gate's
+    NewsBlackoutVerdict.active_event, carried through) -- None otherwise.
+    Added after the other fields, with a default, so this stays additive
+    for anything already constructing a ComplianceVerdict without it."""
 
     def __post_init__(self) -> None:
         if not self.object_id.strip():
@@ -135,6 +156,14 @@ class ComplianceVerdict:
             raise ComplianceApprovalError("a blocked ComplianceVerdict must carry a reason")
         if self.allowed and self.reason is not None:
             raise ComplianceApprovalError("an allowed ComplianceVerdict carries no reason")
+        if self.status is ComplianceStatus.NEWS_BLACKOUT and self.active_news_event is None:
+            raise ComplianceApprovalError(
+                "a NEWS_BLACKOUT ComplianceVerdict must carry active_news_event"
+            )
+        if self.status is not ComplianceStatus.NEWS_BLACKOUT and self.active_news_event is not None:
+            raise ComplianceApprovalError(
+                "active_news_event is only set when status is NEWS_BLACKOUT"
+            )
         if self.day_start_equity <= 0:
             raise ComplianceApprovalError("ComplianceVerdict.day_start_equity must be positive")
         if self.peak_equity <= 0:

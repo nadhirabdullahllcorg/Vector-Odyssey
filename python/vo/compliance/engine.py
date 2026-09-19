@@ -18,21 +18,35 @@ Compliance Monitor" article series (mql5.com/en/articles/24396) --
 ENUM_COMPLIANCE_STATUS's own SAFE/WARNING/CRITICAL/BREACHED shape and its
 70%/90% warning/critical thresholds.
 
+NOTE ON TERMINOLOGY (corrected 2026-09-19): this engine's total-
+drawdown reference IS a trailing drawdown in the sense most prop firms
+use the term -- `_peak_equity` is a running maximum that rises with the
+account, so the effective limit trails upward as equity grows, exactly
+matching PropFirmGuard's own behavior. What v1 does NOT implement is a
+LOCKED/frozen trailing stop some firms use once profit crosses a
+threshold (e.g. the trailing reference stops moving and freezes at
+breakeven once equity first reaches initial-balance-plus-X%) -- that is
+a real, firm-specific variant, not yet needed until a specific firm's
+rules are confirmed. Separately: this engine trails off ACCOUNT EQUITY
+(intraday floating P&L included), matching PropFirmGuard's own choice --
+some firms instead trail off BALANCE only (closed trades), which is a
+looser standard; confirm which convention the real account uses before
+trusting this on it.
+
 WHAT THIS v1 DELIBERATELY DOES NOT DO, flagged rather than guessed at,
 matching this project's own "ship the mechanical piece first" discipline
 (risk.yaml/swings.yaml/regime.yaml's own headers all say the same thing
 about their own first versions):
 
-  - TRAILING drawdown (the total-drawdown reference here is a static
-    since-activation peak, matching PropFirmGuard's own choice -- some
-    prop firms instead trail the limit off a moving reference, e.g. only
-    counting profit above the initial balance toward the peak; that is a
-    real, firm-specific variant NOT implemented here).
-  - News blackouts and session restrictions -- this project has no
-    EconomicEventContext yet (architecture/vo-phase-plan.md SS9 already
-    flags this as unbuilt), and session enforcement duplicates the
-    already-real vo.time Time Engine rather than reinventing it; both are
-    natural v2 additions once there is a live path to wire them into.
+  - The locked/frozen trailing-stop variant and the balance-vs-equity
+    trailing distinction described above.
+  - Session restrictions (e.g. no trading outside RTH) -- would duplicate
+    the already-real vo.time Time Engine rather than reinventing it; a
+    natural v2 addition once there is a live path to wire it into.
+    (News blackouts ARE now implemented -- see vo.compliance.news_gate,
+    added 2026-09-19 at the user's explicit request, and wired into
+    on_snapshot below via the optional `news_gate_config`/`upcoming_events`
+    parameters.)
   - Consistency rules / minimum trading days / profit targets -- these
     need a persisted trade-history view this engine does not have
     (ComplianceEngine only ever sees the current AccountState snapshot);
@@ -58,15 +72,18 @@ uncritically.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, time
 
 from vo.compliance.compliance_config import ComplianceConfig
+from vo.compliance.news_gate import NewsGateConfig, evaluate_news_blackout
 from vo.interfaces.compliance import (
     ComplianceApproval,
     ComplianceApprovalError,
     ComplianceStatus,
     ComplianceVerdict,
 )
+from vo.interfaces.economic_events import EconomicEvent
 from vo.interfaces.signals import TradeSignal
 from vo.market.account import AccountState
 from vo.time.calendars import trading_day_of
@@ -85,10 +102,16 @@ class ComplianceEngine:
         config: ComplianceConfig,
         trading_day_opens: time,
         methodology_version: int = 1,
+        news_gate_config: NewsGateConfig | None = None,
     ) -> None:
         self._config = config
         self._trading_day_opens = trading_day_opens
         self._methodology_version = methodology_version
+        self._news_gate_config = news_gate_config
+        """None (the default) means the news gate is disabled -- on_snapshot
+        never evaluates a blackout regardless of what `upcoming_events` a
+        caller passes. Set to actually enable it (see
+        vo.compliance.news_gate.load_news_gate_config)."""
 
         self._current_trading_day: date | None = None
         self._day_start_equity: float | None = None
@@ -116,6 +139,7 @@ class ComplianceEngine:
         generated_at_utc: datetime,
         now_ny: datetime,
         account: AccountState,
+        upcoming_events: Sequence[EconomicEvent] = (),
     ) -> ComplianceVerdict:
         """Evaluate one account snapshot, update the day/peak references,
         and return the resulting ComplianceVerdict (always produced, same
@@ -123,7 +147,9 @@ class ComplianceEngine:
         `generated_at_utc`/`now_ny` are both caller-supplied, never read
         from the wall clock here, matching evaluate_risk's own no-internal-
         clock-read convention (G3-adjacent testability, even though this
-        engine is not itself a ReplayProbe)."""
+        engine is not itself a ReplayProbe). `upcoming_events` is likewise
+        caller-supplied and ignored entirely unless `news_gate_config` was
+        set at construction -- see vo.compliance.news_gate."""
         day = trading_day_of(now_ny, self._trading_day_opens)
         if self._current_trading_day is None or day != self._current_trading_day:
             self._current_trading_day = day
@@ -149,6 +175,11 @@ class ComplianceEngine:
         if total_dd_fraction >= total_limit:
             self._total_breached = True
 
+        status: ComplianceStatus
+        allowed: bool
+        reason: str | None
+        active_news_event: EconomicEvent | None
+
         if self._total_breached:
             status = ComplianceStatus.BREACHED_TOTAL
             allowed = False
@@ -158,6 +189,7 @@ class ComplianceEngine:
                 f"{self._config.total_drawdown_limit_fraction:.2%} minus "
                 f"{self._config.safety_buffer_fraction:.2%} buffer) -- permanently blocked"
             )
+            active_news_event = None
         elif daily_loss_fraction >= daily_limit:
             status = ComplianceStatus.BREACHED_DAILY
             allowed = False
@@ -168,16 +200,29 @@ class ComplianceEngine:
                 f"{self._config.safety_buffer_fraction:.2%} buffer) -- blocked until "
                 f"the next trading day"
             )
+            active_news_event = None
         else:
-            usage = max(daily_used, total_used)
-            allowed = True
-            reason = None
-            if usage >= self._config.critical_threshold_fraction:
-                status = ComplianceStatus.CRITICAL
-            elif usage >= self._config.warning_threshold_fraction:
-                status = ComplianceStatus.WARNING
+            news_verdict = (
+                evaluate_news_blackout(upcoming_events, generated_at_utc, self._news_gate_config)
+                if self._news_gate_config is not None
+                else None
+            )
+            if news_verdict is not None and news_verdict.blocked:
+                status = ComplianceStatus.NEWS_BLACKOUT
+                allowed = False
+                reason = news_verdict.reason
+                active_news_event = news_verdict.active_event
             else:
-                status = ComplianceStatus.SAFE
+                usage = max(daily_used, total_used)
+                allowed = True
+                reason = None
+                active_news_event = None
+                if usage >= self._config.critical_threshold_fraction:
+                    status = ComplianceStatus.CRITICAL
+                elif usage >= self._config.warning_threshold_fraction:
+                    status = ComplianceStatus.WARNING
+                else:
+                    status = ComplianceStatus.SAFE
 
         verdict = ComplianceVerdict(
             object_id=object_id,
@@ -190,6 +235,7 @@ class ComplianceEngine:
             current_equity=account.equity,
             daily_loss_used_fraction=daily_used,
             total_drawdown_used_fraction=total_used,
+            active_news_event=active_news_event,
         )
         self.verdicts.append(verdict)
         return verdict

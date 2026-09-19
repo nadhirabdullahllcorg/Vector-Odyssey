@@ -479,6 +479,8 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.compliance",
         "vo.compliance.compliance_config",
         "vo.compliance.engine",
+        "vo.compliance.news_gate",
+        "vo.interfaces.economic_events",
         "vo.core.mt5",
         "vo.execution",
         "vo.execution.execution_config",

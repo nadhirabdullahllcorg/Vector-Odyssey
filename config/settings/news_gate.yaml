@@ -1,0 +1,42 @@
+# config/settings/news_gate.yaml        versioned; research starting point
+#
+# vo.compliance.news_gate (v1, 2026-09-19) -- blocks new trade approval in
+# a configurable window around qualifying economic events. Built at the
+# user's explicit instruction: "trading is not allowed 5 mins before
+# during and after news." Applies to both live and prop-firm accounts.
+#
+# THE currencies/min_importance SCOPE BELOW IS A STARTING POINT, NOT
+# CONFIRMED: USD-only / HIGH-importance-only, because this project trades
+# USD-denominated US indices (US100/US500) and blocking on every
+# medium-impact event across every currency would be far more restrictive
+# than "5 minutes around NFP/FOMC/CPI." Confirm before relying on this for
+# a real evaluation account -- do non-USD central bank decisions (ECB/BOE/
+# BOJ) move these instruments enough to also warrant a blackout? Should
+# MODERATE-importance events count too?
+#
+# WHERE THE EVENTS THEMSELVES COME FROM IS NOT THIS FILE'S CONCERN --
+# see vo.interfaces.economic_events's own module docstring: the Python
+# MetaTrader5 package has no native calendar access (confirmed directly
+# against MQL5's own docs), so `events` must be populated by something
+# else (a third-party calendar API, an MQL5-side bridge, or a manually
+# maintained FOMC/CPI/NFP list) before this gate can ever actually fire
+# in production.
+version: 1
+
+# Minutes to block BEFORE a qualifying event's scheduled time.
+buffer_before_minutes: 5
+
+# Minutes to block AFTER a qualifying event's scheduled time (or after its
+# end, for an event with duration_minutes > 0 -- e.g. a press conference).
+buffer_after_minutes: 5
+
+# Only events at or above this importance are considered. One of
+# NONE / LOW / MODERATE / HIGH -- mirrors MQL5's own
+# ENUM_CALENDAR_EVENT_IMPORTANCE scale.
+min_importance: HIGH
+
+# Only events whose currency appears here are considered. null means every
+# currency counts (usually too broad -- left as an explicit escape hatch,
+# not the default).
+currencies:
+  - USD

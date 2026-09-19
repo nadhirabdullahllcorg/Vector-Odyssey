@@ -14,11 +14,14 @@ plausible, verified starting point in the exact style risk.yaml's own
 header already established for this project ("THE VALUES BELOW ARE NOT A
 FINISHED ANSWER"). The actual prop firm/evaluation this account is
 running under was not supplied as of this file's creation -- confirm the
-real daily-loss/max-drawdown percentages, whether the firm's drawdown is
-static or trailing (this v1 engine implements static peak-equity
-drawdown only, matching PropFirmGuard -- see engine.py's own module
-docstring), minimum trading days, and any consistency rule before
-trusting this config on a real evaluation account.
+real daily-loss/max-drawdown percentages; whether its drawdown convention
+matches what this engine implements -- a trailing (peak-equity, not
+fixed-initial-balance) drawdown that never locks/freezes once profit
+crosses a threshold, and trails EQUITY (intraday floating P&L included)
+rather than BALANCE (closed trades only) -- see engine.py's own module
+docstring for the corrected terminology and exactly which variant is NOT
+built; minimum trading days; and any consistency rule before trusting
+this config on a real evaluation account.
 """
 
 from __future__ import annotations

@@ -15,15 +15,17 @@
 # re-litigate the engine's algorithm, only bumps `version`.
 #
 # CONFIRM BEFORE A REAL EVALUATION ACCOUNT: the actual prop firm's daily-
-# loss and max-drawdown percentages; whether its drawdown is STATIC
-# (against a fixed since-activation peak, what this v1 engine implements)
-# or TRAILING (a moving reference, e.g. capped at the initial balance --
-# a real, firm-specific variant NOT implemented here, see engine.py's own
-# module docstring); minimum trading days; any consistency rule; and
-# whether the firm resets daily limits at a specific server/UTC hour
-# rather than this project's own CME trade-date convention
-# (vo.time.calendars.trading_day_of, reused here rather than adding a
-# second, cruder "reset hour" concept).
+# loss and max-drawdown percentages; whether its trailing-drawdown
+# convention matches what this engine implements -- trails off the
+# account's own running-peak EQUITY (intraday floating P&L included,
+# matching PropFirmGuard's own choice) and never locks/freezes once
+# profit crosses a threshold, unlike some firms' locked trailing stops
+# (a real, firm-specific variant NOT implemented here -- see engine.py's
+# own module docstring, corrected 2026-09-19); minimum trading days; any
+# consistency rule; and whether the firm resets daily limits at a
+# specific server/UTC hour rather than this project's own CME trade-date
+# convention (vo.time.calendars.trading_day_of, reused here rather than
+# adding a second, cruder "reset hour" concept).
 version: 1
 
 # Daily loss limit, as a fraction of the trading day's START equity

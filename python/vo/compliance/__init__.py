@@ -5,6 +5,14 @@ which all shift up by one to make room -- the identical pattern Phase 14
 used to insert vo.signals/vo.allocation/vo.risk between vo.research (5)
 and vo.core/vo.telemetry).
 
+v1.1 (2026-09-19), added at the user's explicit request, applying to both
+live and prop-firm accounts: vo.compliance.news_gate blocks new trade
+approval in a configurable window around qualifying economic events
+(ComplianceStatus.NEWS_BLACKOUT, additive). See news_gate.py's own module
+docstring for the buffer/threshold design and vo.interfaces.
+economic_events for why populating the actual event list is a separate,
+not-yet-decided wiring question.
+
 Confirmed with the user 2026-09-19, prompted by research into commercial
 and open-source prop-firm "guardian" EAs (PropFirmGuard and the MQL5
 Compliance Monitor article series, both fetched and read directly, not

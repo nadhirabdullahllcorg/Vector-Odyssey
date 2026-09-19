@@ -12,6 +12,7 @@ import pytest
 
 from vo.compliance.compliance_config import ComplianceConfig, ComplianceConfigError
 from vo.compliance.engine import ComplianceEngine, approve_trade
+from vo.compliance.news_gate import NewsGateConfig
 from vo.interfaces.compliance import (
     ComplianceApproval,
     ComplianceApprovalError,
@@ -19,6 +20,7 @@ from vo.interfaces.compliance import (
     ComplianceVerdict,
 )
 from vo.interfaces.decisions import Direction
+from vo.interfaces.economic_events import EconomicEvent, EventImportance
 from vo.interfaces.signals import TradeSignal
 from vo.market.account import AccountState
 
@@ -40,6 +42,30 @@ def _config(**overrides: float) -> ComplianceConfig:
 
 def _engine(**overrides: float) -> ComplianceEngine:
     return ComplianceEngine(config=_config(**overrides), trading_day_opens=_TRADING_DAY_OPENS)
+
+
+def _news_gate_config(**overrides: object) -> NewsGateConfig:
+    base: dict[str, object] = dict(
+        version=1,
+        buffer_before_minutes=5.0,
+        buffer_after_minutes=5.0,
+        min_importance=EventImportance.HIGH,
+        currencies=("USD",),
+    )
+    base.update(overrides)
+    return NewsGateConfig(**base)  # type: ignore[arg-type]
+
+
+def _news_event(**overrides: object) -> EconomicEvent:
+    base: dict[str, object] = dict(
+        event_id="NFP-2026-09",
+        name="Non-Farm Payrolls",
+        currency="USD",
+        scheduled_at_utc=datetime(2026, 9, 10, 12, 0, tzinfo=UTC),
+        importance=EventImportance.HIGH,
+    )
+    base.update(overrides)
+    return EconomicEvent(**base)  # type: ignore[arg-type]
 
 
 def _account(equity: float) -> AccountState:
@@ -266,6 +292,69 @@ def test_warning_and_critical_staging_below_the_hard_limit() -> None:
     )
     assert critical.status is ComplianceStatus.CRITICAL
     assert critical.allowed is True
+
+
+# ── news gate integration ────────────────────────────────────────────────
+
+
+def test_news_blackout_blocks_an_otherwise_safe_snapshot() -> None:
+    engine = ComplianceEngine(
+        config=_config(),
+        trading_day_opens=_TRADING_DAY_OPENS,
+        news_gate_config=_news_gate_config(),
+    )
+    engine.on_snapshot(
+        object_id="V1", generated_at_utc=datetime(2026, 9, 10, tzinfo=UTC),
+        now_ny=_ny(10), account=_account(10_000.0),
+    )
+    verdict = engine.on_snapshot(
+        object_id="V2",
+        generated_at_utc=datetime(2026, 9, 10, 12, 2, tzinfo=UTC),  # 2 min after the event
+        now_ny=_ny(11), account=_account(10_000.0),  # otherwise perfectly SAFE
+        upcoming_events=[_news_event()],
+    )
+    assert verdict.status is ComplianceStatus.NEWS_BLACKOUT
+    assert verdict.allowed is False
+    assert verdict.active_news_event is not None
+    assert verdict.active_news_event.event_id == "NFP-2026-09"
+    assert verdict.reason is not None and "Non-Farm Payrolls" in verdict.reason
+
+
+def test_no_news_gate_config_means_events_are_ignored() -> None:
+    engine = _engine()  # no news_gate_config passed
+    engine.on_snapshot(
+        object_id="V1", generated_at_utc=datetime(2026, 9, 10, tzinfo=UTC),
+        now_ny=_ny(10), account=_account(10_000.0),
+    )
+    verdict = engine.on_snapshot(
+        object_id="V2",
+        generated_at_utc=datetime(2026, 9, 10, 12, 2, tzinfo=UTC),
+        now_ny=_ny(11), account=_account(10_000.0),
+        upcoming_events=[_news_event()],
+    )
+    assert verdict.status is ComplianceStatus.SAFE
+    assert verdict.allowed is True
+
+
+def test_daily_breach_takes_precedence_over_a_concurrent_news_blackout() -> None:
+    engine = ComplianceEngine(
+        config=_config(),
+        trading_day_opens=_TRADING_DAY_OPENS,
+        news_gate_config=_news_gate_config(),
+    )
+    engine.on_snapshot(
+        object_id="V1", generated_at_utc=datetime(2026, 9, 10, tzinfo=UTC),
+        now_ny=_ny(10), account=_account(10_000.0),
+    )
+    # daily loss AND inside the news window, at the same instant
+    verdict = engine.on_snapshot(
+        object_id="V2",
+        generated_at_utc=datetime(2026, 9, 10, 12, 2, tzinfo=UTC),
+        now_ny=_ny(11), account=_account(9_500.0),  # 5% loss -- breaches the 4.5% effective limit
+        upcoming_events=[_news_event()],
+    )
+    assert verdict.status is ComplianceStatus.BREACHED_DAILY
+    assert verdict.active_news_event is None
 
 
 # ── approve_trade / G15 ─────────────────────────────────────────────────
