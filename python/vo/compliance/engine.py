@@ -51,16 +51,20 @@ about their own first versions):
     need a persisted trade-history view this engine does not have
     (ComplianceEngine only ever sees the current AccountState snapshot);
     a v2 concern, not this file's job.
-  - Persistence across a terminal restart -- PropFirmGuard's own design
-    deliberately re-anchors day-start equity to whatever equity is
-    current at restart (its own words: "prevents cumulative loss beyond
-    a fresh trading day"), which this engine matches structurally (the
-    day boundary is recomputed from `now_ny` every call, never loaded
-    from a file) -- but the PEAK-equity reference is in-memory only here
-    and does NOT survive a restart. A real prop account needs the peak
-    persisted (matching the second reference's own SQLite-backed
-    settings table, keyed by account login/server) before this can be
-    trusted unattended across restarts -- flagged, not built, v2.
+  - (RESOLVED 2026-09-19, no longer a gap.) Persistence across a
+    terminal restart is now implemented in vo.compliance.state_store:
+    restored_state= on this constructor takes a CompliancePersistentState
+    back, and persistent_state() exports one to save. Peak equity and the
+    permanent total-breach flag always restore; the DAY anchor restores
+    only when the saved trading day is still the current one, and
+    otherwise re-anchors through the ordinary day-rollover branch below.
+    That day-anchor behavior deliberately DIVERGES from PropFirmGuard,
+    which re-anchors day-start equity on every restart -- see
+    state_store's own docstring for why copying that would let a
+    mid-day restart grant itself a second full daily allowance. This
+    engine still performs no I/O of its own: the caller loads and saves
+    the file, matching the "given, not fetched" discipline
+    vo.observation.atr and vo.risk.manager already follow.
 
 THE DAY BOUNDARY reuses vo.time.calendars.trading_day_of (the CME
 trade-date convention this project already adopted for every other
@@ -77,6 +81,10 @@ from datetime import date, datetime, time
 
 from vo.compliance.compliance_config import ComplianceConfig
 from vo.compliance.news_gate import NewsGateConfig, evaluate_news_blackout
+from vo.compliance.state_store import (
+    CURRENT_STATE_VERSION,
+    CompliancePersistentState,
+)
 from vo.interfaces.compliance import (
     ComplianceApproval,
     ComplianceApprovalError,
@@ -103,6 +111,7 @@ class ComplianceEngine:
         trading_day_opens: time,
         methodology_version: int = 1,
         news_gate_config: NewsGateConfig | None = None,
+        restored_state: CompliancePersistentState | None = None,
     ) -> None:
         self._config = config
         self._trading_day_opens = trading_day_opens
@@ -122,6 +131,18 @@ class ComplianceEngine:
         # clears naturally the next trading day (a fresh _day_start_equity).
         self._total_breached = False
 
+        if restored_state is not None:
+            # Peak and the permanent breach flag restore unconditionally:
+            # they are not day-scoped, and losing either is exactly the
+            # silent-allowance-widening failure state_store exists to
+            # prevent. The day anchor restores as-saved; if the saved day
+            # is stale, on_snapshot's own day-rollover branch re-anchors
+            # it on the first call, with no special case needed here.
+            self._peak_equity = restored_state.peak_equity
+            self._total_breached = restored_state.total_breached
+            self._current_trading_day = restored_state.trading_day
+            self._day_start_equity = restored_state.day_start_equity
+
         self.verdicts: list[ComplianceVerdict] = []
 
     def current_status(self) -> ComplianceStatus:
@@ -131,6 +152,26 @@ class ComplianceEngine:
         if not self.verdicts:
             return ComplianceStatus.SAFE
         return self.verdicts[-1].status
+
+    def persistent_state(
+        self, *, account: AccountState, saved_at_utc: datetime
+    ) -> CompliancePersistentState:
+        """Export what must survive a restart, for
+        vo.compliance.state_store.save_compliance_state. `account` supplies
+        the login/server identity the loader checks against -- a state file
+        is only ever restorable onto the account that wrote it.
+        `saved_at_utc` is caller-supplied, never read from the wall clock
+        here, same as on_snapshot's own timestamps."""
+        return CompliancePersistentState(
+            version=CURRENT_STATE_VERSION,
+            account_login=account.login,
+            account_server=account.server,
+            trading_day=self._current_trading_day,
+            day_start_equity=self._day_start_equity,
+            peak_equity=self._peak_equity,
+            total_breached=self._total_breached,
+            saved_at_utc=saved_at_utc,
+        )
 
     def on_snapshot(
         self,
