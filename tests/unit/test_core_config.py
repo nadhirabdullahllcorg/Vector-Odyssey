@@ -158,14 +158,20 @@ def test_live_trading_is_off_when_the_section_is_absent(tmp_path: Path) -> None:
     assert config.live_trading is None
 
 
-def test_the_shipped_config_ships_with_live_trading_disabled() -> None:
+def test_the_shipped_config_does_not_trade() -> None:
     """The repository default must be a research process, not a trading
-    one. If this ever flips, it should be a deliberate commit."""
+    one. If this ever flips, it should be a deliberate commit.
+
+    Asserts the PROPERTY (this config will not place orders) rather than
+    the presence of a live_trading section: vo_ea.yaml is tracked but
+    carries a machine-specific wire.dir, so a working copy and a fresh
+    clone legitimately differ in whether the section is there at all.
+    Absent and present-but-disabled are both "does not trade", and that
+    is the thing worth pinning."""
     repo_root = Path(__file__).resolve().parents[2]
     config = load_ea_config(repo_root / "config" / "settings" / "vo_ea.yaml")
 
-    assert config.live_trading is not None
-    assert config.live_trading.enabled is False
+    assert config.live_trading is None or config.live_trading.enabled is False
 
 
 def test_live_trading_must_be_switched_on_explicitly(tmp_path: Path) -> None:
