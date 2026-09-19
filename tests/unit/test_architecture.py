@@ -42,9 +42,10 @@ LAYERS: dict[str, int] = {
     "vo.signals": 6,
     "vo.allocation": 7,
     "vo.risk": 8,
-    "vo.core": 9,
-    "vo.execution": 10,
-    "vo.telemetry": 11,
+    "vo.compliance": 9,
+    "vo.core": 10,
+    "vo.execution": 11,
+    "vo.telemetry": 12,
 }
 
 # Only this module may talk to the terminal.
@@ -220,6 +221,42 @@ def test_risk_is_the_sole_trade_signal_producer() -> None:
     assert not offenders, (
         f"Only {sorted(TRADE_SIGNAL_PRODUCER_MODULES)} may construct a TradeSignal. "
         f"Offenders: {sorted(set(offenders))}"
+    )
+
+
+# G15 (architecture/vo-phase-plan.md, the Account Compliance Engine): "no
+# TradeSignal reaches execution without a ComplianceApproval." Enforced the
+# identical way G14 enforces its own TradeSignal rule -- by scanning for the
+# one thing that must not happen anywhere else, a ComplianceApproval(
+# constructor call -- rather than trusting a docstring to stay true.
+
+COMPLIANCE_APPROVAL_PRODUCER_MODULES = frozenset({"vo.compliance.engine"})
+
+
+def test_compliance_is_the_sole_approval_producer() -> None:
+    offenders: list[str] = []
+
+    for path in _python_files(VO_ROOT):
+        module = _module_name(path, VO_ROOT)
+
+        if module in COMPLIANCE_APPROVAL_PRODUCER_MODULES:
+            continue
+
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+
+            if name == "ComplianceApproval":
+                offenders.append(module)
+
+    assert not offenders, (
+        f"Only {sorted(COMPLIANCE_APPROVAL_PRODUCER_MODULES)} may construct a "
+        f"ComplianceApproval. Offenders: {sorted(set(offenders))}"
     )
 
 
@@ -439,6 +476,9 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.risk",
         "vo.risk.risk_config",
         "vo.risk.manager",
+        "vo.compliance",
+        "vo.compliance.compliance_config",
+        "vo.compliance.engine",
         "vo.core.mt5",
         "vo.execution",
         "vo.execution.execution_config",

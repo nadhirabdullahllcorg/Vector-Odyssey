@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from vo.core.mt5 import TerminalExecutionApi, build_open_request
 from vo.execution.execution_config import ExecutionConfig
 from vo.execution.types import ExecutionEvent
+from vo.interfaces.compliance import ComplianceApproval
 from vo.interfaces.signals import TradeSignal
 
 
@@ -39,12 +40,34 @@ class ExecutionRouter:
     known_tickets: dict[int, str] = field(default_factory=dict)
     """order_ticket -> the TradeSignal.object_id that opened it."""
 
-    def place(self, trade_signal: TradeSignal, *, broker_symbol: str) -> ExecutionEvent:
+    def place(
+        self,
+        trade_signal: TradeSignal,
+        approval: ComplianceApproval,
+        *,
+        broker_symbol: str,
+    ) -> ExecutionEvent:
         """Builds the OrderRequest, sends it, records the resulting
         ExecutionEvent (win or lose -- a rejected send is recorded just
         as faithfully as a filled one, matching Phase 14's "every
         rejection carries a reason" discipline one stage further down
-        the pipeline)."""
+        the pipeline).
+
+        `approval` is required, not optional: a ComplianceApproval is
+        constructible ONLY by vo.compliance.engine.approve_trade (gate
+        G15, tests/unit/test_architecture.py::
+        test_compliance_is_the_sole_approval_producer), so a caller
+        cannot reach send_order() without first having passed the
+        Account Compliance Engine's own daily/total drawdown check --
+        see vo.interfaces.compliance's own module docstring for why this
+        is a required parameter rather than an internal call this method
+        could just as easily skip."""
+        if approval.trade_signal_id != trade_signal.object_id:
+            raise ValueError(
+                f"ComplianceApproval {approval.object_id} was issued for trade_signal "
+                f"{approval.trade_signal_id!r}, not {trade_signal.object_id!r} -- "
+                "refusing to place a mismatched approval"
+            )
         request = build_open_request(
             trade_signal,
             broker_symbol=broker_symbol,
