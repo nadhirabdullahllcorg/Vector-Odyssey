@@ -52,7 +52,7 @@ from typing import Any, Protocol
 
 from vo.interfaces.decisions import Direction
 from vo.interfaces.signals import TradeSignal
-from vo.market.account import Order, Position
+from vo.market.account import Order, Position, PositionSide
 
 _PLATFORM = "MT5"
 
@@ -75,6 +75,13 @@ class OrderAction(Enum):
     still-pending order (never sent to market) via MT5's
     TRADE_ACTION_REMOVE -- distinct from CLOSE, which closes an already-
     open, already-filled position via TRADE_ACTION_DEAL."""
+    MODIFY = "MODIFY"
+    """Added 2026-09-19 for live stop adjustment: changes an OPEN
+    position's stop-loss/take-profit in place via MT5's
+    TRADE_ACTION_SLTP. Sends no deal and moves no volume -- the position
+    stays exactly as it is, only its protective levels move. This is the
+    one primitive a trailing stop needs, and the codebase had none until
+    now (OPEN/CLOSE/CANCEL could create and destroy, never adjust)."""
 
     def __str__(self) -> str:
         return self.value
@@ -181,11 +188,25 @@ class OrderRequest:
                 raise ValueError("a CLOSE OrderRequest needs a position_ticket")
             if self.order_ticket is not None:
                 raise ValueError("a CLOSE OrderRequest carries no order_ticket")
-        else:  # CANCEL
+        elif self.action is OrderAction.CANCEL:
             if self.order_ticket is None:
                 raise ValueError("a CANCEL OrderRequest needs an order_ticket")
             if self.position_ticket is not None:
                 raise ValueError("a CANCEL OrderRequest carries no position_ticket")
+        else:  # MODIFY
+            if self.position_ticket is None:
+                raise ValueError("a MODIFY OrderRequest needs a position_ticket")
+            if self.order_ticket is not None:
+                raise ValueError("a MODIFY OrderRequest carries no order_ticket")
+            if self.stop_loss is None and self.take_profit is None:
+                # MT5's SLTP action writes BOTH levels from this one
+                # request; sending it with neither set would clear both
+                # protective levels off a live position. Never a thing
+                # this codebase wants to express by accident.
+                raise ValueError(
+                    "a MODIFY OrderRequest needs at least one of stop_loss/take_profit -- "
+                    "sending neither would strip both levels off an open position"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +318,61 @@ def build_cancel_request(
     )
 
 
+def build_modify_request(
+    position: Position,
+    *,
+    stop_loss: float | None,
+    take_profit: float | None,
+    magic: int,
+    comment: str,
+) -> OrderRequest:
+    """Move an open position's protective levels, without touching its
+    volume or direction (MT5 TRADE_ACTION_SLTP).
+
+    BOTH LEVELS ARE ABSOLUTE AND BOTH ARE WRITTEN. MT5's SLTP action
+    takes the whole pair in one request, so passing None for one of them
+    REMOVES that level from the live position. A caller that means to
+    move only the stop must pass `take_profit=position.take_profit`
+    explicitly to preserve it -- this signature deliberately has no
+    defaults, so that choice cannot be made by omission. (This is the
+    classic trailing-stop bug: move the stop, silently delete the
+    target.)
+
+    REFUSES TO LOOSEN A STOP. For a LONG, a stop may only move up; for a
+    SHORT, only down. Every caller in this codebase wants trailing
+    semantics, and widening risk on a live position is the one mistake
+    here with no honest use case -- so it fails loud at the lowest level
+    rather than depending on each caller's own care. Adding a stop where
+    the position had none is always allowed. If a real loosening case
+    ever appears, it gets its own explicit path, not a silent one.
+    """
+    if stop_loss is not None and position.stop_loss is not None:
+        if position.side is PositionSide.LONG and stop_loss < position.stop_loss:
+            raise ValueError(
+                f"refusing to loosen a LONG stop on position {position.ticket}: "
+                f"{position.stop_loss} -> {stop_loss} widens risk"
+            )
+        if position.side is PositionSide.SHORT and stop_loss > position.stop_loss:
+            raise ValueError(
+                f"refusing to loosen a SHORT stop on position {position.ticket}: "
+                f"{position.stop_loss} -> {stop_loss} widens risk"
+            )
+
+    return OrderRequest(
+        action=OrderAction.MODIFY,
+        broker_symbol=position.broker_symbol,
+        direction=None,
+        volume=position.volume,
+        price=None,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        deviation_points=0,
+        magic=magic,
+        comment=comment,
+        position_ticket=position.ticket,
+    )
+
+
 def map_order_result(raw: Any, *, now: datetime) -> OrderResult:
     """Map MT5's OrderSendResult (order_send()'s return value) to an
     OrderResult. `now` is given, not fetched (this project's "given, not
@@ -381,10 +457,12 @@ class MT5ExecutionClient:
         both OPEN and CLOSE -- MT5's standard "market execution" action;
         a CLOSE is a deal against `request.position_ticket` in the
         opposite direction, which MT5 nets against the open position.
-        CANCEL is a different MT5 action entirely (TRADE_ACTION_REMOVE,
-        a still-pending order that was never filled) and is dispatched
-        separately, before any of the DEAL-specific fields below are
-        built."""
+        CANCEL and MODIFY are different MT5 actions entirely
+        (TRADE_ACTION_REMOVE for a still-pending order that was never
+        filled; TRADE_ACTION_SLTP for moving an open position's
+        protective levels without dealing any volume) and are each
+        dispatched separately, before any of the DEAL-specific fields
+        below are built."""
         self._require_connected()
         mt5 = _mt5()
 
@@ -396,6 +474,28 @@ class MT5ExecutionClient:
             from datetime import UTC as _UTC
 
             return map_order_result(raw, now=datetime.now(_UTC))
+
+        if request.action is OrderAction.MODIFY:
+            assert request.position_ticket is not None
+            # TRADE_ACTION_SLTP: no deal, no volume, no price, no
+            # deviation -- only the protective levels move. 0.0 is MT5's
+            # own "no level" value, which is why build_modify_request
+            # forces the caller to state both sides explicitly.
+            sltp_request: dict[str, Any] = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": request.broker_symbol,
+                "position": request.position_ticket,
+                "sl": request.stop_loss if request.stop_loss is not None else 0.0,
+                "tp": request.take_profit if request.take_profit is not None else 0.0,
+                "magic": request.magic,
+                "comment": request.comment,
+            }
+            raw = mt5.order_send(sltp_request)
+            if raw is None:
+                raise MT5ExecutionError(f"order_send() returned None: {mt5.last_error()}")
+            from datetime import UTC as _UTC2
+
+            return map_order_result(raw, now=datetime.now(_UTC2))
 
         mt5_request: dict[str, Any] = {
             "action": mt5.TRADE_ACTION_DEAL,

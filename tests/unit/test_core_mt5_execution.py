@@ -23,6 +23,7 @@ from vo.core.mt5 import (
     OrderRequest,
     build_cancel_request,
     build_close_request,
+    build_modify_request,
     build_open_request,
     map_order_result,
 )
@@ -283,3 +284,131 @@ def test_map_order_result_unrecognized_retcode_is_honestly_unknown():
 def test_map_order_result_rejects_naive_datetime():
     with pytest.raises(ValueError, match="timezone-aware"):
         map_order_result(_raw_result(), now=datetime(2026, 9, 18, 14, 30))
+
+
+# ── MODIFY: the live stop-adjustment primitive ────────────────────────────
+
+
+def test_build_modify_request_moves_the_stop_without_touching_volume():
+    position = _position(side=PositionSide.LONG, stop_loss=28900.0, take_profit=29050.0)
+
+    request = build_modify_request(
+        position,
+        stop_loss=28960.0,
+        take_profit=position.take_profit,
+        magic=20260914,
+        comment="VO:trail",
+    )
+
+    assert request.action is OrderAction.MODIFY
+    assert request.position_ticket == 778001
+    assert request.order_ticket is None
+    assert request.direction is None
+    assert request.stop_loss == 28960.0
+    assert request.take_profit == 29050.0
+    assert request.volume == position.volume
+
+
+def test_a_long_stop_may_not_be_loosened():
+    """The one mistake here with no honest use case: widening risk on a
+    live position."""
+    position = _position(side=PositionSide.LONG, stop_loss=28900.0)
+
+    with pytest.raises(ValueError, match="refusing to loosen a LONG stop"):
+        build_modify_request(
+            position,
+            stop_loss=28850.0,
+            take_profit=position.take_profit,
+            magic=20260914,
+            comment="VO:trail",
+        )
+
+
+def test_a_short_stop_may_not_be_loosened():
+    position = _position(side=PositionSide.SHORT, stop_loss=29050.0)
+
+    with pytest.raises(ValueError, match="refusing to loosen a SHORT stop"):
+        build_modify_request(
+            position,
+            stop_loss=29100.0,
+            take_profit=position.take_profit,
+            magic=20260914,
+            comment="VO:trail",
+        )
+
+
+def test_a_short_stop_may_be_tightened_downward():
+    position = _position(side=PositionSide.SHORT, stop_loss=29050.0)
+
+    request = build_modify_request(
+        position,
+        stop_loss=29000.0,
+        take_profit=position.take_profit,
+        magic=20260914,
+        comment="VO:trail",
+    )
+
+    assert request.stop_loss == 29000.0
+
+
+def test_adding_a_stop_to_a_position_that_had_none_is_allowed():
+    position = _position(stop_loss=None)
+
+    request = build_modify_request(
+        position,
+        stop_loss=28900.0,
+        take_profit=position.take_profit,
+        magic=20260914,
+        comment="VO:protect",
+    )
+
+    assert request.stop_loss == 28900.0
+
+
+def test_a_modify_with_neither_level_is_refused():
+    """MT5's SLTP writes both levels from one request -- sending neither
+    would strip both off a live position."""
+    with pytest.raises(ValueError, match="at least one of stop_loss/take_profit"):
+        build_modify_request(
+            _position(),
+            stop_loss=None,
+            take_profit=None,
+            magic=20260914,
+            comment="VO:oops",
+        )
+
+
+def test_a_modify_request_carries_no_order_ticket():
+    with pytest.raises(ValueError, match="carries no order_ticket"):
+        OrderRequest(
+            action=OrderAction.MODIFY,
+            broker_symbol="US100.n",
+            direction=None,
+            volume=1.0,
+            price=None,
+            stop_loss=28900.0,
+            take_profit=None,
+            deviation_points=0,
+            magic=20260914,
+            comment="VO:oops",
+            position_ticket=778001,
+            order_ticket=990001,
+        )
+
+
+def test_a_modify_request_needs_a_position_ticket():
+    with pytest.raises(ValueError, match="needs a position_ticket"):
+        OrderRequest(
+            action=OrderAction.MODIFY,
+            broker_symbol="US100.n",
+            direction=None,
+            volume=1.0,
+            price=None,
+            stop_loss=28900.0,
+            take_profit=None,
+            deviation_points=0,
+            magic=20260914,
+            comment="VO:oops",
+            position_ticket=None,
+            order_ticket=None,
+        )
