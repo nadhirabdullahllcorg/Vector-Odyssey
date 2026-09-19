@@ -189,6 +189,7 @@ input color  InpSessionStatsHeaderColor = clrSilver;
 
 //--- Re-read bookkeeping (same pattern as VO_Swings.mq5's g_last_seen_bar_open).
 datetime g_last_seen_bar_open = 0;
+string   g_last_feed_header  = "";  // last feed header drawn; "" forces a redraw
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -228,6 +229,7 @@ int OnCalculate(const int rates_total, const int prev_calculated, const datetime
    if(current_bar_open != g_last_seen_bar_open)
      {
       g_last_seen_bar_open = current_bar_open;
+      g_last_feed_header = "";   // new bar: the live-edge band must be re-extended
       VO_ReadAndDraw();
      }
    return(rates_total);
@@ -266,8 +268,6 @@ color VO_RegimeColor(const string regime)
 //| feed but deliberately ignored here -- VO_ReferenceLevels.mq5's     |
 //| own job (see this file's header note).                            |
 //+------------------------------------------------------------------+
-string g_last_feed_header = "";  // Experts-log diagnostics print once per new feed header
-
 //+------------------------------------------------------------------+
 //| On-chart status line (top-left): build tag, feed path, what was    |
 //| drawn (or why nothing was). Silence is never ambiguous again.      |
@@ -329,6 +329,15 @@ void VO_ReadAndDraw()
       line_count++;
      }
    FileClose(handle);   // <-- closed BEFORE any chart-object work
+
+   // Unchanged feed (same provenance header) -> nothing to redraw. With the
+   // deep-history feed (tens of thousands of bands) a full delete/recreate
+   // every timer tick is the single most expensive thing this indicator can
+   // do, and it is pure waste when the publisher wrote the same file again.
+   // The open-ended final band still tracks the live edge: force a redraw
+   // when the current bar changed (OnCalculate resets g_last_feed_header).
+   if(header == g_last_feed_header && StringLen(header) > 0)
+      return;
 
    // The live edge a still-current (end_epoch 0) band is extended to.
    const datetime live_edge = iTime(_Symbol, PERIOD_CURRENT, 0);
