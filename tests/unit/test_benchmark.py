@@ -10,6 +10,7 @@ import pytest
 from vo.market.account import AccountState
 from vo.telemetry.benchmark import (
     BenchmarkProgress,
+    high_water_mark_from_drawdown,
     measure_benchmark_progress,
     render_progress_line,
 )
@@ -90,3 +91,26 @@ def test_the_type_exposes_no_quantity_that_could_be_multiplied_into_a_size() -> 
         "fraction_of_high_water_mark",
         "recovered",
     }
+
+
+def test_a_drawdown_resolves_into_an_absolute_mark() -> None:
+    mark = high_water_mark_from_drawdown(100_000.0, 27_000.0)
+
+    assert mark == 127_000.0
+
+
+def test_the_mark_is_fixed_once_and_does_not_chase_the_account() -> None:
+    """Recomputing the mark as equity moves would make the gap never
+    close -- a report that can never deliver good news."""
+    mark = high_water_mark_from_drawdown(100_000.0, 27_000.0)
+
+    recovered_a_little = measure_benchmark_progress(
+        _account(110_000.0), high_water_mark=mark, observed_at_utc=_AT
+    )
+
+    assert recovered_a_little.distance_to_high_water_mark == 17_000.0
+
+
+def test_a_nonsense_starting_equity_is_refused() -> None:
+    with pytest.raises(ValueError, match="starting_equity must be > 0"):
+        high_water_mark_from_drawdown(0.0, 27_000.0)

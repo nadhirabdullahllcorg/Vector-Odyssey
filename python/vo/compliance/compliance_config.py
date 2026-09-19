@@ -91,6 +91,15 @@ class ComplianceConfig:
     # permitted to read it as one -- see vo.telemetry.benchmark and gate
     # G16 for where "distance back to the peak" is allowed to live.
     high_water_mark_currency: float | None = None
+    # The same anchor expressed the way an account holder actually knows
+    # it -- "I am down X from my peak" -- rather than as an absolute
+    # equity figure they would have to look up. When set, the peak is
+    # anchored to (first observed equity + this), once, on the first
+    # snapshot.
+    #
+    # Mutually exclusive with high_water_mark_currency: two ways to say
+    # the same thing, and letting both be set invites them to disagree.
+    high_water_mark_drawdown_currency: float | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 < self.daily_loss_limit_fraction <= 1.0):
@@ -117,6 +126,22 @@ class ComplianceConfig:
             raise ComplianceConfigError(
                 "warning_threshold_fraction must be < critical_threshold_fraction, "
                 "and both must be in (0, 1)"
+            )
+        if (
+            self.high_water_mark_currency is not None
+            and self.high_water_mark_drawdown_currency is not None
+        ):
+            raise ComplianceConfigError(
+                "set high_water_mark_currency OR high_water_mark_drawdown_currency, "
+                "not both -- they are two spellings of one anchor and could disagree"
+            )
+        if (
+            self.high_water_mark_drawdown_currency is not None
+            and self.high_water_mark_drawdown_currency <= 0
+        ):
+            raise ComplianceConfigError(
+                f"high_water_mark_drawdown_currency must be > 0 when set, got "
+                f"{self.high_water_mark_drawdown_currency}"
             )
         if self.high_water_mark_currency is not None and self.high_water_mark_currency <= 0:
             raise ComplianceConfigError(
@@ -190,6 +215,11 @@ def load_compliance_config(path: str | Path) -> ComplianceConfig:
         high_water_mark_currency=(
             float(top["high_water_mark_currency"])
             if top.get("high_water_mark_currency") is not None
+            else None
+        ),
+        high_water_mark_drawdown_currency=(
+            float(top["high_water_mark_drawdown_currency"])
+            if top.get("high_water_mark_drawdown_currency") is not None
             else None
         ),
     )

@@ -702,3 +702,38 @@ def test_an_anchor_far_above_current_equity_refuses_to_trade_rather_than_pretend
 def test_a_nonpositive_high_water_mark_is_rejected() -> None:
     with pytest.raises(ComplianceConfigError, match="high_water_mark_currency"):
         _live_config(high_water_mark_currency=0.0)
+
+
+def test_a_drawdown_offset_anchors_the_peak_above_first_seen_equity() -> None:
+    """The anchor expressed the way an account holder knows it."""
+    engine = ComplianceEngine(
+        config=_live_config(high_water_mark_drawdown_currency=27_000.0),
+        trading_day_opens=_TRADING_DAY_OPENS,
+    )
+
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(200_000.0),
+    )
+
+    assert verdict.peak_equity == 227_000.0
+
+
+def test_the_two_spellings_of_the_anchor_cannot_both_be_set() -> None:
+    with pytest.raises(ComplianceConfigError, match="not both"):
+        _live_config(
+            high_water_mark_currency=127_000.0, high_water_mark_drawdown_currency=27_000.0
+        )
+
+
+def test_the_shipped_live_profile_does_not_anchor_risk_to_the_old_peak() -> None:
+    """Deliberate: anchoring there would start the engine breached on any
+    account below ~111k. The gap lives on the reporting side of the wall
+    instead."""
+    repo_root = Path(__file__).resolve().parents[2]
+    config = load_compliance_config(repo_root / "config" / "settings" / "compliance_live.yaml")
+
+    assert config.high_water_mark_currency is None
+    assert config.high_water_mark_drawdown_currency is None

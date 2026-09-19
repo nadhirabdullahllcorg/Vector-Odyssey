@@ -87,6 +87,22 @@ def measure_benchmark_progress(
     )
 
 
+def high_water_mark_from_drawdown(starting_equity: float, drawdown: float) -> float:
+    """Resolve "I am down X from my peak" into the absolute peak figure
+    BenchmarkProgress needs.
+
+    Called ONCE, at startup, against the equity observed then -- not per
+    snapshot. Recomputing it as equity moves would make the mark chase
+    the account and the gap never close, which would be a report that can
+    never deliver good news: the exact shape of a treadmill.
+    """
+    if starting_equity <= 0:
+        raise ValueError(f"starting_equity must be > 0, got {starting_equity}")
+    if drawdown < 0:
+        raise ValueError(f"drawdown cannot be negative, got {drawdown}")
+    return starting_equity + drawdown
+
+
 def render_progress_line(progress: BenchmarkProgress) -> str:
     """A single human-readable line for a log or dashboard panel. States
     the gap plainly and stops -- no encouragement, no projection, no

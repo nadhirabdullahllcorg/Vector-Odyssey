@@ -284,6 +284,12 @@ class ComplianceEngine:
             # drawdown as its peak, which would silently hand the account
             # a fresh full allowance measured from a depressed reference.
             configured = self._config.high_water_mark_currency
+            offset = self._config.high_water_mark_drawdown_currency
+            if offset is not None:
+                # "I am down X from my peak" -- resolved once, against the
+                # first equity actually observed, since the absolute peak
+                # is not something the config can know.
+                configured = account.equity + offset
             self._peak_equity = (
                 max(configured, account.equity) if configured is not None else account.equity
             )

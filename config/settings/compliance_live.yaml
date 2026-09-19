@@ -56,34 +56,39 @@ daily_loss_mode: DRAWDOWN_HEADROOM
 # leaving ~6.8% genuinely usable.
 daily_halt_at_total_usage: 0.65
 
-# ── high-water mark (risk anchor, NOT a recovery target) ──────────────────
+# ── high-water mark: reported, deliberately NOT the risk anchor ───────────
 #
-# The account's real peak equity. With this set, the drawdown reference is
-# anchored here on the first snapshot instead of to whatever equity the
-# process happens to start on -- so an EA started mid-drawdown does not
-# treat the bottom of that drawdown as its peak and hand itself a fresh
-# full allowance measured from a depressed reference.
+# The account is down $27,000 from its peak (user, 2026-09-19, confirmed
+# as -$27k). Anchoring the DRAWDOWN REFERENCE to that peak was the
+# original intent, and the engine supports it
+# (high_water_mark_drawdown_currency below). It is left unset, because
+# the arithmetic says it cannot be used as a risk anchor on this account:
 #
-# THIS MAKES THE LIMITS STRICTER, NEVER LOOSER. It is the opposite of a
-# recovery target. The gap back to this number is reported by
-# vo.telemetry.benchmark, and gate G16 makes it mechanically impossible
-# for any strategy, allocator, risk or compliance code to import that
-# reporting -- reporting is not targeting.
+#   peak = current equity + 27,000, so drawdown-from-peak is already
+#   27,000 / (equity + 27,000). Against a 19.5% enforced allowance that
+#   is ALREADY BREACHED unless equity is above ~111,462, and already past
+#   the 65% halt unless equity is above ~186,018.
 #
-# THE NUMBER BELOW IS THE USER'S WORDS TAKEN LITERALLY ("the total $27k is
-# the peak figure") AND NEEDS ONE CONFIRMATION, because two readings of
-# the original message are possible and they behave very differently:
+# So anchoring there does not make the engine careful -- it makes the
+# engine refuse to trade, permanently, on day one. The allowance was
+# spent before the EA existed.
 #
-#   (a) peak equity WAS $27,000 -- what is written here.
-#   (b) the account is $27,000 BELOW its peak, i.e. the peak is
-#       current_equity + 27,000, a number that cannot be computed here.
+# The resolution uses the separation this file and vo.telemetry.benchmark
+# were built around:
 #
-# How to tell which you have, without guessing: start the engine and read
-# the first verdict. Under (a), if current equity is more than ~19.5%
-# below 27,000 (i.e. below ~21,735), the engine will report BREACHED_TOTAL
-# immediately and refuse to trade. That is the anchor being honest, not a
-# bug -- but if it happens and reading (b) was meant, replace this number
-# with the real peak rather than widening total_drawdown_limit_fraction to
-# make room. Widening the limit to fit a bookkeeping choice converts it
-# into real extra risk.
-high_water_mark_currency: 27000.0
+#   RISK ANCHOR  -> unset. The 20% limit protects the equity that is
+#                   actually here, measured from today forward. That is a
+#                   live constraint with real room to operate in.
+#   BENCHMARK    -> the 27,000 gap, reported by vo.telemetry.benchmark,
+#                   visible on every report, and barred by gate G16 from
+#                   reaching any sizing or entry decision.
+#
+# The drawdown is not being forgotten. It is being put on the side of the
+# wall where looking at it cannot cost anything.
+#
+# To anchor risk to the true peak anyway, set the line below to 27000.0
+# and expect BREACHED_TOTAL on the first snapshot unless equity clears
+# ~111,462. Do NOT widen total_drawdown_limit_fraction to make that fit:
+# that converts a bookkeeping choice into real extra risk, which is the
+# one move that undoes the point of the whole file.
+# high_water_mark_drawdown_currency: 27000.0
