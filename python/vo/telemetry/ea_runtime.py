@@ -52,11 +52,13 @@ from datetime import UTC, datetime
 from vo.core.config import EAConfig
 from vo.core.pipeline import ObservationPipeline, PipelineSnapshot
 from vo.interfaces.economic_events import EconomicEvent
+from vo.interfaces.signals import TradeSignal
 from vo.market.economic_calendar_ingestion import (
     QuarantinedCalendarLine,
     read_calendar_snapshot,
 )
 from vo.market.ingestion import JsonlTailer
+from vo.telemetry.live_dispatch import DispatchResult, LiveDispatcher
 from vo.telemetry.publisher import RuntimeStatePublisher
 from vo.telemetry.state import CURRENT_SCHEMA_VERSION, ConnectionStatus, RuntimeState
 from vo.telemetry.trade_pipeline import (
@@ -119,6 +121,7 @@ class VOEaRuntime:
         session_configs: dict[str, SessionConfig],
         publisher: RuntimeStatePublisher | None = None,
         trade_hooks: TradeEvaluationHooks | None = None,
+        dispatcher: LiveDispatcher | None = None,
     ) -> None:
         self.config = config
         self.pipeline = ObservationPipeline(broker_profiles, session_configs)
@@ -135,6 +138,13 @@ class VOEaRuntime:
         # on its own.
         self.trade_hooks = trade_hooks
         self.last_pipeline_result: TradePipelineResult | None = None
+
+        # The live-order seam. None (the default) keeps this runtime's
+        # original posture exactly: a TradeSignal is produced, logged,
+        # and never dispatched. Attaching a dispatcher is the single,
+        # deliberate act that lets this process reach a broker.
+        self.dispatcher = dispatcher
+        self.last_dispatch: DispatchResult | None = None
 
         # Calendar cache -- see this module's own docstring, "Calendar
         # cache" section. Always on, unlike trade_hooks: this changes no
@@ -206,12 +216,7 @@ class VOEaRuntime:
                 )
                 self.last_pipeline_result = result
                 if result is not None and result.trade_signal is not None:
-                    logger.info(
-                        "TradeSignal produced (%s): no execution adapter is "
-                        "wired to consume it -- Phase 18's job, not this "
-                        "poll loop's",
-                        result.trade_signal.object_id,
-                    )
+                    self._handle_trade_signal(result.trade_signal)
                 elif result is not None and result.signal is not None:
                     logger.info(
                         "trade pipeline evaluated, no TradeSignal (signal=%s "
@@ -222,9 +227,67 @@ class VOEaRuntime:
 
         return new_count
 
+    def _handle_trade_signal(self, trade_signal: TradeSignal) -> None:
+        """Dispatch the signal if a dispatcher is attached; otherwise log
+        it and stop, exactly as this runtime always did."""
+        if self.dispatcher is None:
+            logger.info(
+                "TradeSignal produced (%s): no dispatcher attached, so it is "
+                "recorded and not sent",
+                trade_signal.object_id,
+            )
+            return
+
+        symbol = self.pipeline.latest_symbol
+        if symbol is None:
+            # Position sizing already needed a Symbol to produce this
+            # signal, so this should not happen -- but dispatching
+            # without one would mean guessing the tick economics the
+            # headroom gate depends on, and a guess there either blocks
+            # good trades or admits one that eats past the halt point.
+            logger.warning(
+                "TradeSignal %s not dispatched: no Symbol observed on the wire yet",
+                trade_signal.object_id,
+            )
+            return
+
+        result = self.dispatcher.dispatch(
+            trade_signal,
+            symbol=symbol,
+            upcoming_events=self.latest_calendar_events,
+        )
+        self.last_dispatch = result
+
+        if result.sent:
+            logger.info("TradeSignal %s SENT", trade_signal.object_id)
+        else:
+            logger.warning(
+                "TradeSignal %s not sent (%s): %s",
+                trade_signal.object_id,
+                result.outcome,
+                result.reason,
+            )
+
     async def run_forever(self) -> None:
         await self.publisher.start()
         self._running = True
+
+        if self.dispatcher is not None:
+            # Commissioning happens BEFORE the first poll, so no signal
+            # can ever be evaluated against an unproven execution path.
+            report = self.dispatcher.commission()
+            if report is None:
+                logger.warning(
+                    "a dispatcher is attached but no preflight was configured -- "
+                    "nothing will be dispatched until one has passed"
+                )
+            else:
+                logger.info("execution preflight: %s", report.summary())
+                if not report.passed:
+                    logger.error(
+                        "execution preflight FAILED -- this session will observe "
+                        "and evaluate, but will dispatch nothing"
+                    )
         logger.info(
             "VO_EA v%s watching %s for broker_symbol=%s",
             self.config.ea_phase,
