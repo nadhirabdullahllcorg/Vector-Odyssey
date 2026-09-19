@@ -24,6 +24,23 @@ send anything to a broker: no vo.execution call is made here, by
 design. A produced TradeSignal is logged and kept, never dispatched --
 that wiring is Phase 18's, and is deliberately absent so "no live
 orders" remains true by omission, not by a flag someone could miss.
+
+Calendar cache (2026-09-19). VOEaRuntime also keeps
+self.latest_calendar_events fresh by re-reading
+config.calendar_wire_path() (VO_CalendarBridge.mq5's snapshot file) on
+its own cadence (config.wire.calendar_refresh_seconds), independent of
+whether any bar/tick/meta line arrived this poll -- the calendar file is
+rewritten on a timer, not driven by price ticks. This is the SAME kind
+of disposable, always-safe scaffolding as trade_hooks: nothing in this
+module reads self.latest_calendar_events (ComplianceEngine.on_snapshot's
+`upcoming_events` parameter is not called anywhere here), so its only
+present effect is keeping a fresh EconomicEvent tuple available for
+whenever Phase 18's real strategy attaches a compliance evaluation step
+-- deciding what to DO with a blackout is explicitly not this module's
+job, exactly as trade_hooks never dispatches a TradeSignal. A missing or
+not-yet-written calendar file is not an error (see
+read_calendar_snapshot's own docstring): the cache just stays empty
+until the bridge produces one.
 """
 
 from __future__ import annotations
@@ -34,6 +51,11 @@ from datetime import UTC, datetime
 
 from vo.core.config import EAConfig
 from vo.core.pipeline import ObservationPipeline, PipelineSnapshot
+from vo.interfaces.economic_events import EconomicEvent
+from vo.market.economic_calendar_ingestion import (
+    QuarantinedCalendarLine,
+    read_calendar_snapshot,
+)
 from vo.market.ingestion import JsonlTailer
 from vo.telemetry.publisher import RuntimeStatePublisher
 from vo.telemetry.state import CURRENT_SCHEMA_VERSION, ConnectionStatus, RuntimeState
@@ -114,6 +136,16 @@ class VOEaRuntime:
         self.trade_hooks = trade_hooks
         self.last_pipeline_result: TradePipelineResult | None = None
 
+        # Calendar cache -- see this module's own docstring, "Calendar
+        # cache" section. Always on, unlike trade_hooks: this changes no
+        # decision-path behavior, it is a read-and-cache side channel
+        # nothing consumes yet.
+        self._calendar_path = config.calendar_wire_path()
+        self._calendar_refresh_seconds = config.wire.calendar_refresh_seconds
+        self._last_calendar_refresh: datetime | None = None
+        self.latest_calendar_events: tuple[EconomicEvent, ...] = ()
+        self.calendar_quarantine: tuple[QuarantinedCalendarLine, ...] = ()
+
     def _poll_tailer(self, tailer: JsonlTailer) -> int:
         result = tailer.poll()
         for record in result.records:
@@ -124,6 +156,30 @@ class VOEaRuntime:
             )
         return len(result.records) + len(result.quarantined)
 
+    def _refresh_calendar_if_due(self, now: datetime) -> None:
+        """Re-read the calendar snapshot at most once per
+        calendar_refresh_seconds -- cheap enough to check on every
+        poll_once call, but the actual file read (and any quarantine
+        logging) only happens once the interval has elapsed. The first
+        call always refreshes (self._last_calendar_refresh starts None).
+        """
+        if self._last_calendar_refresh is not None:
+            elapsed = (now - self._last_calendar_refresh).total_seconds()
+            if elapsed < self._calendar_refresh_seconds:
+                return
+
+        result = read_calendar_snapshot(self._calendar_path)
+        self.latest_calendar_events = result.events
+        self.calendar_quarantine = result.quarantined
+        self._last_calendar_refresh = now
+
+        for quarantined_line in result.quarantined:
+            logger.warning(
+                "quarantined calendar line from %s: %s",
+                self._calendar_path,
+                quarantined_line.reason,
+            )
+
     async def poll_once(self) -> int:
         """One pass over all three wire files. Returns how many new
         lines (parsed or not) were seen -- a RuntimeState is only
@@ -133,6 +189,8 @@ class VOEaRuntime:
             self._poll_tailer(tailer)
             for tailer in (self._bar_tailer, self._tick_tailer, self._meta_tailer)
         )
+
+        self._refresh_calendar_if_due(datetime.now(UTC))
 
         if new_count:
             snapshot = self.pipeline.snapshot()

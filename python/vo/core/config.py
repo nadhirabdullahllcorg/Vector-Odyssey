@@ -29,6 +29,14 @@ class EAConfigError(ValueError):
 class WireConfig:
     dir: Path
     poll_interval_seconds: float
+    # How often VOEaRuntime re-reads the calendar bridge's snapshot file
+    # (vo.market.economic_calendar_ingestion.read_calendar_snapshot) --
+    # independent of poll_interval_seconds, since the calendar file is
+    # rewritten whole on its own cadence (VO_CalendarBridge.mq5's own
+    # InpRefreshMinutes), not appended to on every tick/bar like the
+    # price wire files. Additive field with a default so every existing
+    # WireConfig(...) call site (tests included) keeps working unchanged.
+    calendar_refresh_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,14 @@ class EAConfig:
     def meta_wire_path(self) -> Path:
         return self.wire.dir / f"{self.broker_symbol}_meta.jsonl"
 
+    def calendar_wire_path(self) -> Path:
+        """VO_CalendarBridge.mq5's default output path
+        (InpOutputSubdir/InpOutputFilename). Unlike the other three wire
+        files, this one is NOT broker_symbol-scoped -- MT5's economic
+        calendar is account/terminal-wide, not per-instrument -- so the
+        filename is fixed rather than built from self.broker_symbol."""
+        return self.wire.dir / "calendar.jsonl"
+
 
 def _require_mapping(raw: Any, path: str, field: str | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
@@ -94,6 +110,10 @@ def load_ea_config(path: str | Path) -> EAConfig:
     if poll_interval <= 0:
         raise EAConfigError(f"{path}: wire.poll_interval_seconds must be > 0")
 
+    calendar_refresh = float(wire.get("calendar_refresh_seconds", 60.0))
+    if calendar_refresh <= 0:
+        raise EAConfigError(f"{path}: wire.calendar_refresh_seconds must be > 0")
+
     config_files = raw.get("config_files") or {}
     brokers_path = Path(config_files.get("brokers", "config/settings/brokers.yaml"))
     sessions_path = Path(config_files.get("sessions", "config/settings/sessions.yaml"))
@@ -110,7 +130,11 @@ def load_ea_config(path: str | Path) -> EAConfig:
 
     return EAConfig(
         broker_symbol=broker_symbol,
-        wire=WireConfig(dir=Path(wire_dir), poll_interval_seconds=poll_interval),
+        wire=WireConfig(
+            dir=Path(wire_dir),
+            poll_interval_seconds=poll_interval,
+            calendar_refresh_seconds=calendar_refresh,
+        ),
         brokers_path=brokers_path,
         sessions_path=sessions_path,
         telemetry=TelemetryConfig(host=telemetry_host, port=telemetry_port),

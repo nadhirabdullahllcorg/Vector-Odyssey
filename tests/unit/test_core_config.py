@@ -57,6 +57,43 @@ def test_bar_tick_meta_wire_paths_follow_vo_transport_naming(tmp_path: Path) -> 
     assert config.meta_wire_path() == base / "US100.n_meta.jsonl"
 
 
+def test_calendar_wire_path_is_not_broker_symbol_scoped(tmp_path: Path) -> None:
+    """MT5's economic calendar is account/terminal-wide, not per-symbol --
+    VO_CalendarBridge.mq5 writes one fixed filename, unlike the three
+    price wire files."""
+    config = load_ea_config(_write(tmp_path, _VALID))
+
+    assert config.calendar_wire_path() == Path("/tmp/mt5-files/VectorOdyssey/calendar.jsonl")
+    assert "US100.n" not in config.calendar_wire_path().name
+
+
+def test_calendar_refresh_seconds_defaults_and_is_configurable(tmp_path: Path) -> None:
+    default_config = load_ea_config(_write(tmp_path, _VALID))
+    assert default_config.wire.calendar_refresh_seconds == 60.0
+
+    text = """
+    instrument:
+      broker_symbol: "US100.n"
+    wire:
+      dir: "/tmp/mt5-files/VectorOdyssey"
+      calendar_refresh_seconds: 300
+    """
+    configured = load_ea_config(_write(tmp_path, text))
+    assert configured.wire.calendar_refresh_seconds == 300.0
+
+
+def test_non_positive_calendar_refresh_seconds_raises(tmp_path: Path) -> None:
+    text = """
+    instrument:
+      broker_symbol: "US100.n"
+    wire:
+      dir: "/tmp/mt5-files/VectorOdyssey"
+      calendar_refresh_seconds: 0
+    """
+    with pytest.raises(EAConfigError):
+        load_ea_config(_write(tmp_path, text))
+
+
 def test_defaults_apply_when_optional_sections_are_omitted(tmp_path: Path) -> None:
     minimal = """
     instrument:
