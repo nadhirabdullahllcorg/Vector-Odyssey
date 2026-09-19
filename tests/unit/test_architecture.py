@@ -489,6 +489,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.compliance.state_store",
         "vo.valco",
         "vo.valco.lrx_config",
+        "vo.valco.lrx_gates",
         "vo.telemetry.benchmark",
         "vo.interfaces.economic_events",
         "vo.market.economic_calendar_ingestion",
