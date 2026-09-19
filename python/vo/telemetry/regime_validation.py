@@ -635,7 +635,7 @@ def render_validation_report_markdown(
     lines.append("")
     lines.append(
         "| Period | Bars | EXPANSION share | PULLBACK share | Mean ER (EXP/PB) | "
-        "Mean Hurst (EXP/PB) | Resolutions | Lean match rate |"
+        "Mean Hurst (EXP/PB) | Resolutions | Origin-lean match rate |"
     )
     lines.append("|---|--:|--:|--:|--:|--:|--:|--:|")
     for period in periods:
@@ -652,7 +652,7 @@ def render_validation_report_markdown(
         pb_hurst = _fmt(pb.mean_hurst if pb else None, 2)
         hurst_pair = f"{exp_hurst}/{pb_hurst}"
         pa = r.anticipation
-        rate_str = _fmt(pa.rate, 2) if pa.rate is not None else "n/a"
+        rate_str = _fmt(pa.origin_rate, 2) if pa.origin_rate is not None else "n/a"
         lines.append(
             f"| {period.label} | {r.bar_count} | {exp_share} | {pb_share} | "
             f"{er_pair} | {hurst_pair} | {pa.resolutions} | {rate_str} |"
@@ -678,8 +678,11 @@ def render_validation_report_markdown(
         pa = r.anticipation
         lines.append(
             f"- Resolutions: **{pa.resolutions}** ({pa.to_retracement} retracement, "
-            f"{pa.to_reversal} reversal) — leaned: {pa.leaned} — matched: {pa.matched} — "
-            f"rate: {_fmt(pa.rate, 2) if pa.rate is not None else 'n/a'}"
+            f"{pa.to_reversal} reversal) — origin lean: leaned {pa.origin_leaned}, matched "
+            f"{pa.origin_matched}, rate "
+            f"{_fmt(pa.origin_rate, 2) if pa.origin_rate is not None else 'n/a'} — "
+            f"last-refresh (diagnostic): {pa.leaned}/{pa.matched}/"
+            f"{_fmt(pa.rate, 2) if pa.rate is not None else 'n/a'}"
         )
         lines.append("")
         lines.append(
@@ -858,17 +861,35 @@ def render_validation_report_markdown(
     )
     lines.append("")
     lines.append(
-        "| Information point | Eligible | Leaned | Matched | Rate | "
-        "Majority baseline (eligible) |"
+        "| Information point | Eligible (RET / REV) | Leaned (RET / REV) | Matched | Rate "
+        "[95% Wilson] | Majority baseline (eligible) | vs baseline p |"
     )
-    lines.append("|---|--:|--:|--:|--:|--:|")
+    lines.append("|---|--:|--:|--:|--:|--:|--:|")
     for h in a.by_horizon:
         rate_s = _fmt(h.rate, 4) if h.rate is not None else "n/a"
+        ci = wilson_score_interval(h.matched, h.leaned) if h.leaned else None
+        if ci is not None:
+            rate_s = f"{rate_s} [{ci[0]:.3f}, {ci[1]:.3f}]"
         base = h.majority_baseline_rate
         base_s = _fmt(base, 4) if base is not None else "n/a"
+        p_s = "n/a"
+        if h.leaned and base is not None:
+            test = binomial_test(h.matched, h.leaned, base)
+            p_s = _fmt_p(test.p_value) if test is not None else "n/a"
         lines.append(
-            f"| {h.label} | {h.eligible} | {h.leaned} | {h.matched} | {rate_s} | {base_s} |"
+            f"| {h.label} | {h.eligible} ({h.to_retracement} / {h.to_reversal}) | "
+            f"{h.leaned} ({h.leaned_retracement} / {h.leaned - h.leaned_retracement}) | "
+            f"{h.matched} | {rate_s} | {base_s} | {p_s} |"
         )
+    lines.append("")
+    lines.append(
+        "A rate BELOW the majority baseline at a horizon means always guessing that "
+        "horizon's majority outcome would have done better than the lean. The origin "
+        "row's information point is itself bounded by the swing engine's K-bar "
+        "confirmation lag: a pullback is recorded only once its counter-swing is "
+        "confirmed, K bars after the pivot, so 'origin' is already K bars into the "
+        "pullback -- which is why very short pullbacks still score near 1.0 there."
+    )
     lines.append("")
     if a.confidence_is_constant:
         lines.append(

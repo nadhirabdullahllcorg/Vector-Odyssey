@@ -235,6 +235,13 @@ class HorizonScore:
     matched: int
     rate: float | None
     majority_baseline_rate: float | None
+    to_retracement: int = 0
+    """Eligible chains that resolved RETRACEMENT -- so the reader can see
+    WHICH outcome the majority baseline is made of at each horizon."""
+    to_reversal: int = 0
+    leaned_retracement: int = 0
+    """How many of the leaned chains leaned RETRACEMENT (the rest leaned
+    REVERSAL) -- the lean's own class balance at this information point."""
 
 
 def is_lean_refresh(state: RegimeState, by_id: Mapping[str, RegimeState]) -> bool:
@@ -319,6 +326,7 @@ def score_lean_chains(
     eligible = 0
     leaned = 0
     matched = 0
+    leaned_ret = 0
     outcomes: Counter[RegimeType] = Counter()
     for chain in chains:
         if horizon_bars is None:
@@ -342,6 +350,8 @@ def score_lean_chains(
         if not _is_directional(lean):
             continue
         leaned += 1
+        if lean is AnticipatedResolution.RETRACEMENT:
+            leaned_ret += 1
         if _lean_matches(lean, chain.resolution.regime):
             matched += 1
     if horizon_bars is None:
@@ -357,6 +367,9 @@ def score_lean_chains(
         matched=matched,
         rate=(matched / leaned) if leaned else None,
         majority_baseline_rate=(max(outcomes.values()) / eligible) if eligible else None,
+        to_retracement=outcomes[RegimeType.RETRACEMENT],
+        to_reversal=outcomes[RegimeType.REVERSAL],
+        leaned_retracement=leaned_ret,
     )
 
 
