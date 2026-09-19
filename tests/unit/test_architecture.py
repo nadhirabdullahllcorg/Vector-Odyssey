@@ -499,6 +499,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.execution.router",
         "vo.execution.reconciliation",
         "vo.execution.compliance_closeout",
+        "vo.execution.preflight",
         "vo.telemetry.trade_pipeline",
         "vo.market.aggregate",
         "vo.observation.structure_range",
