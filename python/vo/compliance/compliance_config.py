@@ -77,6 +77,20 @@ class ComplianceConfig:
     # the day. Additive with a default so every existing ComplianceConfig
     # construction site (prop defaults, every test) is unchanged.
     daily_halt_at_total_usage: float = 0.75
+    # The account's real high-water mark in account currency, if it is
+    # known and sits ABOVE whatever equity the engine first observes.
+    #
+    # None (the default) keeps the original behavior: the drawdown
+    # reference is anchored to first-seen equity, which quietly forgives
+    # everything that happened before the process started. Setting it
+    # anchors the peak to real account history instead.
+    #
+    # This is a RISK anchor and nothing else. It makes the drawdown
+    # limits STRICTER, never looser, because drawdown is measured from a
+    # higher peak. It is not a recovery target, and nothing downstream is
+    # permitted to read it as one -- see vo.telemetry.benchmark and gate
+    # G16 for where "distance back to the peak" is allowed to live.
+    high_water_mark_currency: float | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 < self.daily_loss_limit_fraction <= 1.0):
@@ -103,6 +117,11 @@ class ComplianceConfig:
             raise ComplianceConfigError(
                 "warning_threshold_fraction must be < critical_threshold_fraction, "
                 "and both must be in (0, 1)"
+            )
+        if self.high_water_mark_currency is not None and self.high_water_mark_currency <= 0:
+            raise ComplianceConfigError(
+                f"high_water_mark_currency must be > 0 when set, got "
+                f"{self.high_water_mark_currency}"
             )
         if not (0.0 < self.daily_halt_at_total_usage <= 1.0):
             raise ComplianceConfigError(
@@ -168,4 +187,9 @@ def load_compliance_config(path: str | Path) -> ComplianceConfig:
         critical_threshold_fraction=float(top["critical_threshold_fraction"]),
         daily_loss_mode=daily_loss_mode,
         daily_halt_at_total_usage=float(top.get("daily_halt_at_total_usage", 0.75)),
+        high_water_mark_currency=(
+            float(top["high_water_mark_currency"])
+            if top.get("high_water_mark_currency") is not None
+            else None
+        ),
     )

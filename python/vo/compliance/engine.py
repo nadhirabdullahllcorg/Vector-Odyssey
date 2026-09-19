@@ -277,7 +277,17 @@ class ComplianceEngine:
             self._current_trading_day = day
             self._day_start_equity = account.equity
 
-        if self._peak_equity is None or account.equity > self._peak_equity:
+        if self._peak_equity is None:
+            # Anchor the drawdown reference. A configured high-water mark
+            # wins over first-seen equity whenever it is higher: an EA
+            # started mid-drawdown must not treat the bottom of that
+            # drawdown as its peak, which would silently hand the account
+            # a fresh full allowance measured from a depressed reference.
+            configured = self._config.high_water_mark_currency
+            self._peak_equity = (
+                max(configured, account.equity) if configured is not None else account.equity
+            )
+        elif account.equity > self._peak_equity:
             self._peak_equity = account.equity
 
         assert self._day_start_equity is not None  # set immediately above on first call

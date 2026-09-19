@@ -484,6 +484,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.compliance.state_store",
         "vo.valco",
         "vo.valco.lrx_config",
+        "vo.telemetry.benchmark",
         "vo.interfaces.economic_events",
         "vo.market.economic_calendar_ingestion",
         "vo.core.mt5",
@@ -529,3 +530,48 @@ def test_vo_does_not_import_dashboard() -> None:
         + "\n  ".join(offenders)
     )
 
+
+
+# ── G16: a recovery benchmark can never reach the sizing path ─────────────
+#
+# Measuring the gap back to a prior peak is legitimate reporting. Letting
+# that gap influence what is traded or how big is the mechanism that turns
+# a drawdown into a larger one, and the strategy spec already bans every
+# mechanical form of it (no martingale, no loss-based lot escalation).
+#
+# vo.telemetry.benchmark sits at the top layer, so the layering test
+# already makes this impossible. This test names the guarantee explicitly
+# so that a future refactor moving the module somewhere "more convenient"
+# fails with a reason rather than silently opening the door.
+
+BENCHMARK_MODULE = "vo.telemetry.benchmark"
+SIZING_PATH_PACKAGES = (
+    "vo.valco",
+    "vo.signals",
+    "vo.allocation",
+    "vo.risk",
+    "vo.compliance",
+    "vo.execution",
+)
+
+
+def test_benchmark_progress_never_reaches_the_sizing_path() -> None:
+    """Scans real IMPORTS, not raw text: a module is free to explain in a
+    comment why it must not import the benchmark (compliance_config does
+    exactly that), and saying so is the opposite of an offence."""
+    offenders: list[str] = []
+
+    for path in _python_files(VO_ROOT):
+        module = _module_name(path, VO_ROOT)
+        if not module.startswith(SIZING_PATH_PACKAGES):
+            continue
+        if any(
+            imported == BENCHMARK_MODULE or imported.startswith(BENCHMARK_MODULE + ".")
+            for imported in _imports_of(path)
+        ):
+            offenders.append(module)
+
+    assert not offenders, (
+        "a recovery benchmark must never be readable from the sizing or "
+        "decision path -- reporting is not targeting:\n  " + "\n  ".join(sorted(offenders))
+    )

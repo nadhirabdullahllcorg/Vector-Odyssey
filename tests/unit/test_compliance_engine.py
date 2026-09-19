@@ -610,3 +610,95 @@ def test_the_shipped_live_profile_matches_what_the_user_confirmed() -> None:
     assert config.total_drawdown_limit_fraction == 0.20
     assert config.daily_loss_mode is DailyLossMode.DRAWDOWN_HEADROOM
     assert config.daily_halt_at_total_usage == 0.65
+
+
+# ── the high-water mark as a risk anchor ──────────────────────────────────
+
+
+def test_a_configured_high_water_mark_anchors_the_peak_above_first_seen_equity() -> None:
+    """An EA started mid-drawdown must not treat the bottom of that
+    drawdown as its peak."""
+    engine = ComplianceEngine(
+        config=_live_config(high_water_mark_currency=127_000.0),
+        trading_day_opens=_TRADING_DAY_OPENS,
+    )
+
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    assert verdict.peak_equity == 127_000.0
+    assert verdict.total_drawdown_used_fraction > 0.0
+
+
+def test_a_high_water_mark_below_current_equity_is_ignored() -> None:
+    """A stale mark must never LOWER the peak -- that would loosen the
+    limits, which is the one direction this anchor may not move."""
+    engine = ComplianceEngine(
+        config=_live_config(high_water_mark_currency=50_000.0),
+        trading_day_opens=_TRADING_DAY_OPENS,
+    )
+
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    assert verdict.peak_equity == 100_000.0
+
+
+def test_an_anchored_peak_makes_the_limits_stricter_not_looser() -> None:
+    """Same equity, two configs: the anchored one must never be the more
+    permissive of the pair."""
+    anchored = ComplianceEngine(
+        config=_live_config(high_water_mark_currency=127_000.0),
+        trading_day_opens=_TRADING_DAY_OPENS,
+    ).on_snapshot(
+        object_id="a",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+    unanchored = ComplianceEngine(
+        config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS
+    ).on_snapshot(
+        object_id="b",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    assert anchored.total_drawdown_used_fraction >= unanchored.total_drawdown_used_fraction
+    assert (anchored.headroom_to_halt_currency or 0.0) <= (
+        unanchored.headroom_to_halt_currency or 0.0
+    )
+
+
+def test_an_anchor_far_above_current_equity_refuses_to_trade_rather_than_pretending() -> None:
+    """Failing closed is the correct behavior for a mis-set anchor: the
+    engine says the account is breached rather than quietly trading on a
+    reference it cannot justify."""
+    engine = ComplianceEngine(
+        config=_live_config(high_water_mark_currency=200_000.0),
+        trading_day_opens=_TRADING_DAY_OPENS,
+    )
+
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    assert verdict.status is ComplianceStatus.BREACHED_TOTAL
+    assert verdict.allowed is False
+
+
+def test_a_nonpositive_high_water_mark_is_rejected() -> None:
+    with pytest.raises(ComplianceConfigError, match="high_water_mark_currency"):
+        _live_config(high_water_mark_currency=0.0)
