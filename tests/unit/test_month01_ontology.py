@@ -47,6 +47,7 @@ _EXPECTED_CONCEPT_NAMES = {
     "markov_transition_study",
     "ihmm_engine",
     "canonical_relationship_memory",
+    "provisional_structure_range_forecast",
 }
 
 

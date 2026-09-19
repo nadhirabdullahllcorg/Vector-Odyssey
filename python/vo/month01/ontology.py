@@ -290,3 +290,14 @@ def ihmm_engine() -> None:
 )
 def canonical_relationship_memory() -> None:
     """Shape: Phase 26, built on this phase's CanonicalRecord/AppendOnlyLog."""
+
+
+@concept(
+    tag=ConceptTag.VO_H,
+    note=(
+        "No path to a trade decision, by construction. See G2. Scored against "
+        "Phase 13's RegimeEngine as a forecast, never a replacement of it."
+    ),
+)
+def provisional_structure_range_forecast() -> None:
+    """Shape: Phase 13b deliverable (C) -- vo.observation.structure_range."""

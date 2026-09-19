@@ -4,7 +4,7 @@ Backtest the regime over deep MT5 history -- Phase 13a follow-up.
 
     python scripts/backtest_regime.py [config/settings/vo_ea.yaml] [--bars N] \
         [--validate] [--hurst-report] [--er-report] [--markov-report] \
-        [--hmm-report] [--phase-report]
+        [--hmm-report] [--phase-report] [--structure-range-report]
 
 --validate additionally builds a Regime Engine Validation Report v1
 (vo.telemetry.regime_validation) from the SAME in-memory replay -- no
@@ -78,6 +78,19 @@ if --phase-report is passed alone) and writes
 phase_agreement_<symbol>.md. Same optional-dependency handling as
 --hmm-report.
 
+--structure-range-report additionally builds a VALIDATION-ONLY
+agreement study (vo.research.structure_range_agreement) comparing the
+user's swing/internal asymmetric-range rule
+(vo.observation.structure_range, [VO-H], Phase 13b deliverable (C))
+against Phase 13's REAL classification on the same bars -- confirmed
+2026-09-19: report-only, RegimeEngine's own code and behavior are
+completely unchanged by this flag. Builds two throwaway SwingEngine
+instances (SWING/INTERNAL tiers, the SAME swing_config already loaded
+for Phase 13's own engine) and replays them alongside the SAME
+sequence -- no second MT5 pull -- and writes
+structure_range_report_<symbol>.md. Independent of every other flag;
+does not require hmmlearn.
+
 All report files are written under reports/backtests/, not the repo
 root -- see REPORTS_DIR below.
 """
@@ -101,7 +114,9 @@ from vo.market.mt5 import MT5ReadClient  # noqa: E402
 from vo.market.sequence import build_bar_sequence  # noqa: E402
 from vo.market.timeframe import Timeframe  # noqa: E402
 from vo.observation.regime_config import build_regime_engine, load_regime_config  # noqa: E402
+from vo.observation.structure_range import StructureRangeEngine  # noqa: E402
 from vo.observation.swing_config import load_swing_config  # noqa: E402
+from vo.observation.swings import SwingEngine, SwingLevel  # noqa: E402
 from vo.research.atr_series import build_rolling_atr  # noqa: E402
 from vo.research.efficiency_ratio_report import (  # noqa: E402
     DEFAULT_STRIDE as ER_DEFAULT_STRIDE,
@@ -153,6 +168,12 @@ from vo.research.statistics import (  # noqa: E402
     build_out_of_sample_report,
     build_window_distributions,
 )
+from vo.research.structure_range_agreement import (  # noqa: E402
+    build_range_agreement_report,
+    build_range_comparison_samples,
+    render_range_agreement_markdown,
+    replay_range_states,
+)
 from vo.research.transitions import build_transition_matrix  # noqa: E402
 from vo.telemetry.regime_feed import (  # noqa: E402
     build_regime_markers,
@@ -198,7 +219,9 @@ HMM_ATR_PERIOD = 14
 DEFAULT_BAR_CAP = 1_000_000
 
 
-def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool, bool]:
+def _parse_args(
+    argv: list[str],
+) -> tuple[str, int, bool, bool, bool, bool, bool, bool, bool]:
     config_path = "config/settings/vo_ea.yaml"
     bars = DEFAULT_BAR_CAP
     validate = False
@@ -207,6 +230,7 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool
     markov_report = False
     hmm_report = False
     phase_report = False
+    structure_range_report = False
     rest = []
     i = 0
     while i < len(argv):
@@ -231,6 +255,9 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool
         elif argv[i] == "--phase-report":
             phase_report = True
             i += 1
+        elif argv[i] == "--structure-range-report":
+            structure_range_report = True
+            i += 1
         else:
             rest.append(argv[i])
             i += 1
@@ -245,6 +272,7 @@ def _parse_args(argv: list[str]) -> tuple[str, int, bool, bool, bool, bool, bool
         markov_report,
         hmm_report,
         phase_report,
+        structure_range_report,
     )
 
 
@@ -339,6 +367,7 @@ def main() -> None:
         markov_report,
         hmm_report,
         phase_report,
+        structure_range_report,
     ) = _parse_args(sys.argv[1:])
     config = load_ea_config(config_path)
     profiles = load_broker_profiles(config.brokers_path)
@@ -701,6 +730,51 @@ def main() -> None:
         _write_report(markov_report_path, markov_markdown, provenance)
         print(f"  -> Markov report built in {time.monotonic() - _t_markov:.1f}s", flush=True)
 
+    structure_range_report_path: Path | None = None
+    if structure_range_report:
+        print(
+            "replaying structure-range rule ([VO-H], Phase 13b deliverable (C))...",
+            flush=True,
+        )
+        _t_structure_range = time.monotonic()
+        # Two independent, throwaway SwingEngine instances -- the SAME
+        # swing_config already loaded for Phase 13's own engine, never a
+        # second set of tunables. RegimeEngine's own SwingEngine instances
+        # (inside build_regime_engine) are untouched by these.
+        structure_range_swing_engine = SwingEngine.for_level(
+            swing_config, SwingLevel.SWING, tick_size=symbol.tick_size
+        )
+        structure_range_internal_engine = SwingEngine.for_level(
+            swing_config, SwingLevel.INTERNAL, tick_size=symbol.tick_size
+        )
+        structure_range_engine = StructureRangeEngine(
+            swing_tier_engine=structure_range_swing_engine,
+            internal_tier_engine=structure_range_internal_engine,
+            tick_size=symbol.tick_size,
+        )
+        range_states = replay_range_states(sequence, structure_range_engine)
+        phase_intervals_for_range = tuple(
+            RegimeInterval(regime=seg.regime, start_utc=seg.start_utc, end_utc=seg.end_utc)
+            for seg in segments
+        )
+        range_comparisons = build_range_comparison_samples(phase_intervals_for_range, range_states)
+        range_agreement = build_range_agreement_report(
+            range_comparisons,
+            instrument_key=config.broker_symbol,
+            timeframe_canonical="M1",
+            generated_utc=datetime.now(UTC),
+        )
+        range_markdown = render_range_agreement_markdown(range_agreement)
+        structure_range_report_path = (
+            REPORTS_DIR / f"structure_range_report_{config.broker_symbol}.md"
+        )
+        _write_report(structure_range_report_path, range_markdown, provenance)
+        print(
+            f"  -> structure-range report built in "
+            f"{time.monotonic() - _t_structure_range:.1f}s",
+            flush=True,
+        )
+
     hmm_report_path: Path | None = None
     phase_report_path: Path | None = None
     hmm_skip_reason: str | None = None
@@ -827,6 +901,8 @@ def main() -> None:
         print(f"HMM report written: {hmm_report_path}")
     if phase_report_path is not None:
         print(f"Phase agreement report written: {phase_report_path}")
+    if structure_range_report_path is not None:
+        print(f"Structure-range report written: {structure_range_report_path}")
     if hmm_skip_reason is not None:
         print(f"HMM/phase report(s) skipped: {hmm_skip_reason}")
     print()

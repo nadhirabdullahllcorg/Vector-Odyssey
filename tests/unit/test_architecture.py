@@ -447,6 +447,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.execution.reconciliation",
         "vo.telemetry.trade_pipeline",
         "vo.market.aggregate",
+        "vo.observation.structure_range",
     ],
 )
 def test_public_packages_import_cleanly(module: str) -> None:
