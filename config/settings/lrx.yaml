@@ -114,9 +114,22 @@ limits:
   max_trades_per_day: 5
   max_concurrent_positions: 1
   max_consecutive_losses: 2
-  # Spread filter -- UNCONFIRMED, needs the real normal US100 spread on
-  # 1xTrade. 0 disables the filter rather than guessing a wrong number.
-  max_spread_points: 0
+  # Spread filter, MEASURED from the real 1xTrade capture rather than
+  # guessed: tests/fixtures/golden/us100n_ticks_20260915.jsonl, 8,523
+  # ticks of US100.n on 2026-09-15. Observed bid/ask spread in points
+  # (point = 0.01): min 76, median 80, p95 83, p99 84, one spike to 234.
+  # The bar records' own spread field sat flat at 76 all session.
+  #
+  # 100 admits every normal quote with real headroom and rejects the
+  # 234-point spike -- the kind of moment a reversal entry should not be
+  # filled into.
+  #
+  # ONE CAVEAT, not papered over: that capture is US100.n
+  # (contract_size 1.0). The live symbol is US100 (contract_size 10.0) --
+  # a differently specced instrument, per phase-plan v28. Spread in
+  # POINTS should carry across, but confirm against a live symbol_info()
+  # read before trusting it on the account that trades.
+  max_spread_points: 100
 
 # ── experiment flags (spec section 28) ────────────────────────────────────
 # Every major concept independently switchable, so a component can be

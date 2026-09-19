@@ -134,6 +134,16 @@ class ComplianceVerdict:
     """Drawdown from peak equity, as a fraction of the buffer-adjusted
     total-drawdown limit (same 1.0 convention as above)."""
     active_news_event: EconomicEvent | None = None
+    headroom_to_halt_currency: float | None = None
+    """How much more the account can lose, in account currency, before the
+    day's halt point is reached -- the same figure the per-position gate
+    checks a proposed trade's risk against (see ComplianceEngine.
+    headroom_rejection). None when no halt point applies to this account
+    profile. Negative would mean already past it, so the engine clamps at
+    0.0: 'no room' is the honest reading, not 'owes room'.
+
+    Additive with a default, so every existing ComplianceVerdict
+    construction keeps working unchanged."""
     """Set exactly when status is NEWS_BLACKOUT (vo.compliance.news_gate's
     NewsBlackoutVerdict.active_event, carried through) -- None otherwise.
     Added after the other fields, with a default, so this stays additive

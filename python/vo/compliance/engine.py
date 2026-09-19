@@ -173,6 +173,71 @@ class ComplianceEngine:
             saved_at_utc=saved_at_utc,
         )
 
+    def _headroom_to_halt_currency(
+        self, *, peak_equity: float, equity: float, total_limit: float
+    ) -> float | None:
+        """Account currency still losable before the day's halt point.
+
+        Only meaningful in DRAWDOWN_HEADROOM mode, where the halt is
+        defined against the total-drawdown allowance. In FIXED mode the
+        day ends on a daily figure instead, so there is no single
+        headroom number to report and this returns None rather than a
+        misleading one.
+
+        Clamped at 0.0: already past the halt point means no room, never
+        negative room.
+        """
+        if self._config.daily_loss_mode is not DailyLossMode.DRAWDOWN_HEADROOM:
+            return None
+
+        halt_drawdown_fraction = total_limit * self._config.daily_halt_at_total_usage
+        equity_at_halt = peak_equity * (1.0 - halt_drawdown_fraction)
+        return max(0.0, equity - equity_at_halt)
+
+    def headroom_rejection(self, *, account: AccountState, projected_loss: float) -> str | None:
+        """Whether a trade risking `projected_loss` may be opened at all.
+
+        THE PER-POSITION FORM OF THE SAME 65% RULE (the user's own
+        instruction, 2026-09-19: "that 65% is applied to per position
+        also"). The daily version asks "has drawdown already reached the
+        halt point?"; this asks "would THIS trade, if it loses in full,
+        carry drawdown past it?" -- and refuses beforehand rather than
+        discovering it afterwards.
+
+        This is the gate that makes the headroom-vs-trade-risk point
+        mechanical: room smaller than the trade that wants it is not
+        usable room, so a trade that would eat past the halt never opens.
+
+        Returns None when the trade fits, or a reason string when it does
+        not -- the same "every rejection carries a reason" discipline as
+        RiskCheck. `projected_loss` is the trade's full risk in account
+        currency (entry to stop, at the sized volume), supplied by the
+        caller; this engine never computes position size itself.
+        """
+        if projected_loss < 0:
+            raise ValueError(f"projected_loss cannot be negative, got {projected_loss}")
+
+        if self._peak_equity is None:
+            # No snapshot has been evaluated yet, so there is no peak to
+            # measure headroom against. Honest answer: cannot say yes.
+            return "compliance has evaluated no snapshot yet; no peak equity to measure against"
+
+        total_limit = self._config.effective_total_drawdown_limit_fraction
+        headroom = self._headroom_to_halt_currency(
+            peak_equity=self._peak_equity, equity=account.equity, total_limit=total_limit
+        )
+        if headroom is None:
+            return None
+
+        if projected_loss > headroom:
+            return (
+                f"a trade risking {projected_loss:.2f} exceeds the {headroom:.2f} remaining "
+                f"before the day's halt point ({self._config.daily_halt_at_total_usage:.0%} "
+                f"of a {total_limit:.2%} drawdown allowance) -- room smaller than the trade "
+                f"that wants it is not usable room"
+            )
+        return None
+
     def _daily_breached(
         self, *, daily_loss_fraction: float, daily_limit: float, total_used: float
     ) -> bool:
@@ -294,6 +359,10 @@ class ComplianceEngine:
                 else:
                     status = ComplianceStatus.SAFE
 
+        headroom = self._headroom_to_halt_currency(
+            peak_equity=self._peak_equity, equity=account.equity, total_limit=total_limit
+        )
+
         verdict = ComplianceVerdict(
             object_id=object_id,
             generated_at_utc=generated_at_utc,
@@ -306,6 +375,7 @@ class ComplianceEngine:
             daily_loss_used_fraction=daily_used,
             total_drawdown_used_fraction=total_used,
             active_news_event=active_news_event,
+            headroom_to_halt_currency=headroom,
         )
         self.verdicts.append(verdict)
         return verdict

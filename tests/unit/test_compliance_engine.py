@@ -7,6 +7,7 @@ unless a test needs otherwise."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ from vo.compliance.compliance_config import (
     ComplianceConfig,
     ComplianceConfigError,
     DailyLossMode,
+    load_compliance_config,
 )
 from vo.compliance.engine import ComplianceEngine, approve_trade
 from vo.compliance.news_gate import NewsGateConfig
@@ -408,7 +410,7 @@ def _live_config(**overrides: object) -> ComplianceConfig:
         warning_threshold_fraction=0.70,
         critical_threshold_fraction=0.90,
         daily_loss_mode=DailyLossMode.DRAWDOWN_HEADROOM,
-        daily_halt_at_total_usage=0.75,
+        daily_halt_at_total_usage=0.65,
     )
     base.update(overrides)
     return ComplianceConfig(**base)  # type: ignore[arg-type]
@@ -490,3 +492,121 @@ def test_fixed_mode_is_unchanged_and_is_the_default() -> None:
     )
 
     assert verdict.status is ComplianceStatus.BREACHED_DAILY
+
+
+# ── the per-position form of the same halt rule ───────────────────────────
+#
+# "that 65% is applied to per position also" (user, 2026-09-19). The daily
+# gate asks whether drawdown has already reached the halt point; this asks
+# whether the trade being proposed would carry it past.
+
+
+def test_a_trade_that_fits_inside_the_remaining_headroom_is_allowed() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    rejection = engine.headroom_rejection(account=_account(100_000.0), projected_loss=500.0)
+
+    assert rejection is None
+
+
+def test_a_trade_larger_than_the_remaining_headroom_is_refused() -> None:
+    """Halt sits at 65% of a 19.5% allowance = 12.675% drawdown, i.e.
+    equity 87_325 off a 100_000 peak. From 88_000 there is 675 of room --
+    a trade risking 800 does not fit."""
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+    engine.on_snapshot(
+        object_id="v2",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 11, 0),
+        account=_account(88_000.0),
+    )
+
+    rejection = engine.headroom_rejection(account=_account(88_000.0), projected_loss=800.0)
+
+    assert rejection is not None
+    assert "not usable room" in rejection
+
+
+def test_the_verdict_reports_the_remaining_headroom() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    # Halt equity = 100_000 * (1 - 0.195 * 0.65) = 87_325.
+    assert verdict.headroom_to_halt_currency == pytest.approx(12_675.0)
+
+
+def test_headroom_never_reports_negative_room() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+    verdict = engine.on_snapshot(
+        object_id="v2",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 11, 0),
+        account=_account(80_000.0),
+    )
+
+    assert verdict.headroom_to_halt_currency == 0.0
+
+
+def test_fixed_mode_reports_no_headroom_figure() -> None:
+    """In FIXED mode the day ends on a daily figure, so there is no single
+    headroom number -- None beats a misleading one."""
+    engine = ComplianceEngine(config=_config(), trading_day_opens=_TRADING_DAY_OPENS)
+    verdict = engine.on_snapshot(
+        object_id="v1",
+        generated_at_utc=_GENERATED_AT,
+        now_ny=datetime(2026, 9, 21, 10, 0),
+        account=_account(100_000.0),
+    )
+
+    assert verdict.headroom_to_halt_currency is None
+    assert engine.headroom_rejection(account=_account(100_000.0), projected_loss=9_999.0) is None
+
+
+def test_headroom_cannot_be_judged_before_any_snapshot() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+
+    rejection = engine.headroom_rejection(account=_account(100_000.0), projected_loss=1.0)
+
+    assert rejection is not None
+    assert "no snapshot" in rejection
+
+
+def test_a_negative_projected_loss_is_a_programming_error() -> None:
+    engine = ComplianceEngine(config=_live_config(), trading_day_opens=_TRADING_DAY_OPENS)
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        engine.headroom_rejection(account=_account(100_000.0), projected_loss=-1.0)
+
+
+def test_the_shipped_live_profile_matches_what_the_user_confirmed() -> None:
+    """Pins config/settings/compliance_live.yaml to the numbers the user
+    actually gave, so a later edit cannot drift them silently."""
+    repo_root = Path(__file__).resolve().parents[2]
+    config = load_compliance_config(repo_root / "config" / "settings" / "compliance_live.yaml")
+
+    assert config.total_drawdown_limit_fraction == 0.20
+    assert config.daily_loss_mode is DailyLossMode.DRAWDOWN_HEADROOM
+    assert config.daily_halt_at_total_usage == 0.65
