@@ -46,12 +46,12 @@ critical_threshold_fraction: 0.90
 # this share of its buffer-adjusted allowance.
 daily_loss_mode: DRAWDOWN_HEADROOM
 
-# 0.75 of a 19.5% enforced allowance halts the day at ~14.6% drawdown,
-# leaving ~5% of headroom unspent for the next session to work with.
+# CONFIRMED BY THE USER (2026-09-19): 0.65, lowered from an initial 0.75.
+# Their reasoning, worth keeping: headroom left below the halt point is
+# only real headroom if it is larger than the risk a trade actually
+# needs -- a sliver too thin to open a position in is not usable room,
+# it just looks like room. Halting earlier keeps what remains spendable.
 #
-# NOT CONFIRMED WITH THE USER -- "close to breach" was the instruction,
-# and this is one honest reading of it. Raising it toward 0.90 halts
-# later and leaves less room; lowering it toward 0.50 stops the day
-# earlier and is the more conservative read. Change this number, not the
-# engine, if it should sit elsewhere.
-daily_halt_at_total_usage: 0.75
+# 0.65 of a 19.5% enforced allowance halts the day at ~12.7% drawdown,
+# leaving ~6.8% genuinely usable.
+daily_halt_at_total_usage: 0.65

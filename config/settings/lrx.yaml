@@ -1,0 +1,136 @@
+# config/settings/lrx.yaml                      versioned; research starting points
+#
+# The LRX liquidity/reference-level reversal test strategy (vo.valco).
+# A DISPOSABLE experiment, not the VO strategy -- see the package's own
+# docstring for why that distinction is load-bearing.
+#
+# EVERY VALUE BELOW THAT IS NOT MARKED "confirmed" IS A FLAGGED STARTING
+# POINT, in the same spirit as swings.yaml/regime.yaml/risk.yaml. The
+# strategy spec's own section 31 lists forty things that must be designed
+# rather than invented; this file is where each of those forty lives, so
+# that changing one is a config edit and a re-run, never a code change.
+#
+# Values marked "confirmed" came from the user directly and are not to be
+# tuned away without asking.
+version: 1
+profile: BASELINE
+
+instrument:
+  broker_symbol: US100
+  execution_timeframe: M1
+  context_timeframe: M15
+
+# ── session windows (confirmed 2026-09-19) ────────────────────────────────
+# New York time, always. Converted through the Time Engine
+# (vo.time.calendars / vo.time.sessions); broker server time is never
+# hardcoded anywhere, per the strategy spec's own section 15.
+session:
+  timezone: America/New_York
+  # The EA may hold and manage positions inside this window.
+  trade_window:
+    opens: "07:00"
+    closes: "14:00"
+  # New setups are only ARMED inside this narrower window. A setup armed
+  # at 13:44 may still trigger and run; nothing new is armed after.
+  setup_selection:
+    opens: "09:00"
+    closes: "13:45"
+  # At trade_window.closes: flat everything, or merely stop entering?
+  # STILL UNCONFIRMED -- assumed flat, the conservative reading.
+  flat_at_window_close: true
+
+# ── reference levels (spec section 2/3) ───────────────────────────────────
+reference_levels:
+  minimum_class: B
+  class_a: [PREV_DAY_HIGH, PREV_DAY_LOW, PREV_RTH_HIGH, PREV_RTH_LOW, RTH_SETTLEMENT]
+  class_b: [SESSION_HIGH, SESSION_LOW, ORG_HIGH, ORG_LOW, MIDNIGHT_OPEN, PREV_DAY_CLOSE]
+  class_c: [INTERNAL_SWING_HIGH, INTERNAL_SWING_LOW]
+
+# ── sweep (spec items 1-3) ────────────────────────────────────────────────
+# A sweep is never just "price traded through a level". It must penetrate,
+# fail to continue, and be followed by opposing displacement.
+sweep:
+  min_penetration_atr: 0.10
+  return_max_bars: 12
+  require_close_beyond: false
+
+# ── expansion / displacement (items 8-11) ─────────────────────────────────
+expansion:
+  min_atr_multiple: 1.5
+  max_bars: 5
+  atr_period: 14
+  # All four origin models are COMPUTED AND RECORDED on every setup; this
+  # selects which one drives the trade. The spec is explicit that this
+  # must not be silently chosen, so the report breaks results down by model.
+  # EXPANSION_ORIGIN | SWING_ORIGIN | EQUILIBRIUM | STRUCTURAL_EQUILIBRIUM
+  origin_model: SWING_ORIGIN
+
+# ── structure (items 4-7) ─────────────────────────────────────────────────
+structure:
+  mss_tier: INTERNAL
+  context_tier: SWING
+  break_on_close: true
+
+# ── inefficiency (items 12-16) ────────────────────────────────────────────
+inefficiency:
+  types: [FVG]
+  min_size_atr: 0.15
+  max_age_bars: 60
+
+# ── entry (items 16-17) ───────────────────────────────────────────────────
+# FVG_FIRST_TOUCH | FVG_CE | EXPANSION_50 | FVG_EQ_OVERLAP | DEEP_ORIGIN
+entry:
+  model: FVG_CE
+  max_rebalance_depth: 1.0
+
+# ── objectives and stop (items 19-23) ─────────────────────────────────────
+objective:
+  cluster_tolerance_atr: 0.5
+  min_distance_atr: 1.0
+  min_reward_risk: 1.5
+  # T1_ONLY until the position manager exists; then T1_T2_T3.
+  target_mode: T1_ONLY
+stop:
+  buffer_atr: 0.25
+
+# ── setup lifecycle (items 18, 31) ────────────────────────────────────────
+setup_life:
+  max_age_minutes: 45
+  max_bars_after_mss: 30
+
+# ── repeat-trade rules (items 38-40) ──────────────────────────────────────
+repeat:
+  max_trades_per_level_per_day: 1
+  blacklist_level_after_stop: true
+  allow_replacement_setup: true
+
+# ── limits (confirmed 2026-09-19) ─────────────────────────────────────────
+# max_trades_per_day and one-position-at-a-time are the user's own numbers.
+# max_concurrent_positions is stated here for the strategy's own arming
+# logic; the ENFORCED cap lives in risk.yaml's max_open_positions, which
+# already reads 1. Risk bounds the trade; this file only avoids arming a
+# setup the risk manager would reject anyway.
+limits:
+  max_trades_per_day: 5
+  max_concurrent_positions: 1
+  max_consecutive_losses: 2
+  # Spread filter -- UNCONFIRMED, needs the real normal US100 spread on
+  # 1xTrade. 0 disables the filter rather than guessing a wrong number.
+  max_spread_points: 0
+
+# ── experiment flags (spec section 28) ────────────────────────────────────
+# Every major concept independently switchable, so a component can be
+# measured by its absence rather than argued about.
+experiment_flags:
+  require_sweep: true
+  require_displacement: true
+  require_mss: true
+  require_inefficiency: true
+  require_rebalance: true
+  use_session_filter: true
+  use_news_filter: true
+  use_liquidity_clusters: true
+  # Section 27: the setup score is OBSERVATIONAL in v1. It is recorded for
+  # every setup, taken or rejected, and filters nothing -- that is what
+  # makes it possible to learn later which components actually predict.
+  score_filters_trades: false
