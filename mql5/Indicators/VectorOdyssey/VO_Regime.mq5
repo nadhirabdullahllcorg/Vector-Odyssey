@@ -142,7 +142,16 @@
 // Build tag: shown in the indicator shortname and the on-chart status line
 // so a screenshot can prove WHICH compiled build is on the chart (a stale
 // .ex5 looks identical otherwise). Bump on every behavior change.
-#define VO_RGM_BUILD  "b38"
+#define VO_RGM_BUILD  "b39"
+
+// Which feed file this chart draws. Each is written by a different
+// publisher; the names match scripts/publish_regime.py / backtest_regime.py.
+enum ENUM_VO_FEED_SOURCE
+  {
+   VO_FEED_LIVE_SWING    = 0, // live, configured tier:  <symbol>_regime.feed          (publish_regime.py --watch)
+   VO_FEED_LIVE_INTERNAL = 1, // live, INTERNAL tier:    <symbol>_regime_internal.feed (publish_regime.py --watch --tier INTERNAL)
+   VO_FEED_HISTORY       = 2  // deep-history backtest:  <symbol>_regime_history.feed  (backtest_regime.py)
+  };
 #define VO_TAG_BAND "BAND"
 #define VO_TAG_MARK "MARK"
 #define VO_TAG_SSTAT "SSTAT"
@@ -153,7 +162,8 @@
 input group "=== Feed source (MQL5\\Files\\<subdir>\\<symbol>_regime.feed) ==="
 input string InpFeedSubdir     = "VectorOdyssey"; // must match VO_Bridge InpOutputSubdir / vo_ea.yaml wire.dir
 input string InpSymbolOverride = "";              // blank = this chart's symbol; else e.g. "US100"
-input string InpFeedName       = "";              // blank = <symbol>_regime.feed (live, publish_regime --watch); "<symbol>_regime_history.feed" = backtest_regime.py's deep history
+input ENUM_VO_FEED_SOURCE InpFeedSource = VO_FEED_LIVE_SWING; // which feed to draw (dropdown; overrides nothing if InpFeedName is set)
+input string InpFeedName       = "";              // advanced: an explicit file name under the subdir; leave blank to use InpFeedSource
 
 input group "=== Refresh ==="
 input int    InpRefreshSeconds = 5;   // re-read the feed on this timer (publish_regime --watch interval)
@@ -243,7 +253,10 @@ int OnCalculate(const int rates_total, const int prev_calculated, const datetime
 string VO_FeedPath()
   {
    const string sym = (StringLen(InpSymbolOverride) > 0) ? InpSymbolOverride : _Symbol;
-   const string file = (StringLen(InpFeedName) > 0) ? InpFeedName : (sym + "_regime.feed");
+   string file = sym + "_regime.feed";
+   if(InpFeedSource == VO_FEED_LIVE_INTERNAL) file = sym + "_regime_internal.feed";
+   if(InpFeedSource == VO_FEED_HISTORY)       file = sym + "_regime_history.feed";
+   if(StringLen(InpFeedName) > 0)             file = InpFeedName; // explicit name wins
    return StringFormat("%s\\%s", InpFeedSubdir, file);
   }
 
