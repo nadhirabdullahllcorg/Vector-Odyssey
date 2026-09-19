@@ -52,7 +52,7 @@ from typing import Any, Protocol
 
 from vo.interfaces.decisions import Direction
 from vo.interfaces.signals import TradeSignal
-from vo.market.account import Position
+from vo.market.account import Order, Position
 
 _PLATFORM = "MT5"
 
@@ -70,6 +70,11 @@ class OrderAction(Enum):
 
     OPEN = "OPEN"
     CLOSE = "CLOSE"
+    CANCEL = "CANCEL"
+    """Added 2026-09-19 for vo.execution.compliance_closeout: cancels a
+    still-pending order (never sent to market) via MT5's
+    TRADE_ACTION_REMOVE -- distinct from CLOSE, which closes an already-
+    open, already-filled position via TRADE_ACTION_DEAL."""
 
     def __str__(self) -> str:
         return self.value
@@ -151,6 +156,11 @@ class OrderRequest:
     magic: int
     comment: str
     position_ticket: int | None
+    order_ticket: int | None = None
+    """Set only for CANCEL -- the pending order's own ticket (orders_get(),
+    not positions_get()). Added after every other field, defaulted to
+    None, so every pre-existing OPEN/CLOSE construction site (which never
+    passed it) keeps working unchanged."""
 
     def __post_init__(self) -> None:
         if not self.broker_symbol.strip():
@@ -164,9 +174,18 @@ class OrderRequest:
                 raise ValueError("an OPEN OrderRequest needs a real direction")
             if self.position_ticket is not None:
                 raise ValueError("an OPEN OrderRequest carries no position_ticket")
-        else:  # CLOSE
+            if self.order_ticket is not None:
+                raise ValueError("an OPEN OrderRequest carries no order_ticket")
+        elif self.action is OrderAction.CLOSE:
             if self.position_ticket is None:
                 raise ValueError("a CLOSE OrderRequest needs a position_ticket")
+            if self.order_ticket is not None:
+                raise ValueError("a CLOSE OrderRequest carries no order_ticket")
+        else:  # CANCEL
+            if self.order_ticket is None:
+                raise ValueError("a CANCEL OrderRequest needs an order_ticket")
+            if self.position_ticket is not None:
+                raise ValueError("a CANCEL OrderRequest carries no position_ticket")
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +267,33 @@ def build_close_request(
         magic=magic,
         comment=comment,
         position_ticket=position.ticket,
+    )
+
+
+def build_cancel_request(
+    order: Order,
+    *,
+    magic: int,
+    comment: str,
+) -> OrderRequest:
+    """A still-pending order (never filled) is cancelled outright, not
+    closed -- MT5's TRADE_ACTION_REMOVE needs only the order's own
+    ticket, no direction/price/deviation. `order.volume_current` is
+    carried through only to satisfy OrderRequest's own volume>0 invariant
+    uniformly across all three actions -- MT5 ignores it for REMOVE."""
+    return OrderRequest(
+        action=OrderAction.CANCEL,
+        broker_symbol=order.broker_symbol,
+        direction=None,
+        volume=order.volume_current,
+        price=None,
+        stop_loss=None,
+        take_profit=None,
+        deviation_points=0,
+        magic=magic,
+        comment=comment,
+        position_ticket=None,
+        order_ticket=order.ticket,
     )
 
 
@@ -334,9 +380,22 @@ class MT5ExecutionClient:
         """Sends `request` and maps the result. Uses TRADE_ACTION_DEAL for
         both OPEN and CLOSE -- MT5's standard "market execution" action;
         a CLOSE is a deal against `request.position_ticket` in the
-        opposite direction, which MT5 nets against the open position."""
+        opposite direction, which MT5 nets against the open position.
+        CANCEL is a different MT5 action entirely (TRADE_ACTION_REMOVE,
+        a still-pending order that was never filled) and is dispatched
+        separately, before any of the DEAL-specific fields below are
+        built."""
         self._require_connected()
         mt5 = _mt5()
+
+        if request.action is OrderAction.CANCEL:
+            assert request.order_ticket is not None
+            raw = mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": request.order_ticket})
+            if raw is None:
+                raise MT5ExecutionError(f"order_send() returned None: {mt5.last_error()}")
+            from datetime import UTC as _UTC
+
+            return map_order_result(raw, now=datetime.now(_UTC))
 
         mt5_request: dict[str, Any] = {
             "action": mt5.TRADE_ACTION_DEAL,

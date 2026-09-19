@@ -21,13 +21,14 @@ from vo.core.mt5 import (
     OrderAction,
     OrderFailureReason,
     OrderRequest,
+    build_cancel_request,
     build_close_request,
     build_open_request,
     map_order_result,
 )
 from vo.interfaces.decisions import Direction
 from vo.interfaces.signals import TradeSignal
-from vo.market.account import Position, PositionSide
+from vo.market.account import Order, OrderKind, OrderState, Position, PositionSide
 from vo.market.identity import InstrumentId
 
 _NOW = datetime(2026, 9, 18, 14, 30, tzinfo=UTC)
@@ -69,6 +70,25 @@ def _position(**overrides):
     )
     defaults.update(overrides)
     return Position(**defaults)
+
+
+def _order(**overrides):
+    defaults = dict(
+        ticket=990001,
+        instrument_id=InstrumentId(platform="MT5", broker_server=_SERVER, broker_symbol="US100.n"),
+        broker_symbol="US100.n",
+        kind=OrderKind.BUY_LIMIT,
+        state=OrderState.PLACED,
+        volume_current=1.0,
+        price_open=28900.0,
+        stop_loss=None,
+        take_profit=None,
+        magic=20260914,
+        comment="VO:disposable_v0",
+        setup_at_broker_epoch_s=1_789_000_000,
+    )
+    defaults.update(overrides)
+    return Order(**defaults)
 
 
 def test_build_open_request_translates_an_approved_trade_signal():
@@ -133,6 +153,50 @@ def test_order_request_rejects_close_without_position_ticket():
             magic=1,
             comment="x",
             position_ticket=None,
+        )
+
+
+def test_build_cancel_request_carries_the_order_ticket_not_a_position():
+    request = build_cancel_request(_order(), magic=20260914, comment="VO:disposable_v0")
+    assert request.action is OrderAction.CANCEL
+    assert request.order_ticket == 990001
+    assert request.position_ticket is None
+    assert request.direction is None
+
+
+def test_order_request_rejects_cancel_without_order_ticket():
+    with pytest.raises(ValueError, match="order_ticket"):
+        OrderRequest(
+            action=OrderAction.CANCEL,
+            broker_symbol="US100.n",
+            direction=None,
+            volume=1.0,
+            price=None,
+            stop_loss=None,
+            take_profit=None,
+            deviation_points=0,
+            magic=1,
+            comment="x",
+            position_ticket=None,
+            order_ticket=None,
+        )
+
+
+def test_order_request_rejects_cancel_with_a_position_ticket():
+    with pytest.raises(ValueError, match="position_ticket"):
+        OrderRequest(
+            action=OrderAction.CANCEL,
+            broker_symbol="US100.n",
+            direction=None,
+            volume=1.0,
+            price=None,
+            stop_loss=None,
+            take_profit=None,
+            deviation_points=0,
+            magic=1,
+            comment="x",
+            position_ticket=778001,
+            order_ticket=990001,
         )
 
 
