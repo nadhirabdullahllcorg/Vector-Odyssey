@@ -155,6 +155,41 @@ class ReplayEvents:
         return tuple(d for d in self.displacements if d.qualified)
 
     @property
+    def displacement_qualifications(self) -> dict[str, int]:
+        """PASS / FAIL / UNMEASURABLE across every measured leg.
+
+        The distinction the first real run hid: a measurement existing
+        is not a displacement qualifying. Reported separately so the
+        selectivity of the detector is visible rather than inferred.
+        """
+        counts: dict[str, int] = {}
+        for event in self.displacements:
+            key = str(event.qualification)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @property
+    def displacement_failure_reasons(self) -> dict[str, int]:
+        """Which clause each non-passing leg fell short on.
+
+        A leg can fail several clauses at once and every one is counted,
+        so these sum to more than the number of failures. This is the
+        beginning of the displacement calibration dataset: the question
+        it exists to answer is what separates a qualifying leg from a
+        near miss, which deleting the failures would make unanswerable.
+        """
+        counts: dict[str, int] = {}
+        for event in self.displacements:
+            if event.qualified or not event.qualification_reason:
+                continue
+            for clause in event.qualification_reason.split("; "):
+                key = clause.strip()
+                if not key:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    @property
     def counts(self) -> dict[str, int]:
         """The funnel. `displacements_measured` counts every leg that
         could be measured at all; `displacements` counts those that

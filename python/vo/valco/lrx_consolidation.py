@@ -155,12 +155,37 @@ class ConsolidationMeasurement:
     carries two of them -- a report column that could be either is a
     result nobody can interpret afterwards."""
     body_efficiency_ratio: float | None
-    """The CERR specification's formula. None when its denominator is
-    zero, i.e. every bar closed exactly at its open -- undefined, not
-    zero."""
+    """DEPRECATED as a research variable; retained for reproducibility.
+
+    The CERR specification's formula. None when its denominator is zero,
+    i.e. every bar closed exactly at its open -- undefined, not zero.
+
+    Real US100 history showed it exceeding 1.0 on 0.21% of windows, with
+    a maximum of 6.24. Not an arithmetic error: the numerator runs from
+    the first OPEN to the last CLOSE and so crosses inter-bar gaps, while
+    the denominator sums only candle bodies and never sees them. It is
+    body-only directional efficiency, not bounded path efficiency, and on
+    a gapped instrument it is not on a comparable scale to Kaufman --
+    whose maximum in the same sample was 0.9976, correctly bounded.
+
+    In the normal range the two are nearly identical (medians 0.200 vs
+    0.204), so it adds little and becomes pathological exactly where the
+    market gaps. Kaufman is the cleaner variable. Still measured, still
+    recorded, still selectable via EfficiencyMeasure.BODY so old datasets
+    remain interpretable -- but not a candidate for the baseline
+    definition. A synthetic fixture with no gaps could never have shown
+    this; only real history did."""
 
     mean_range_points: float
     mean_range_atr: float | None
+    """DEPRECATED as a discriminator; retained as a measurement.
+
+    Real US100 history put this at p25 0.94, median 0.996, p75 1.05 --
+    pinned at 1.0, because ATR IS mean true range, so mean bar range
+    divided by ATR is close to an identity of the measurement process
+    rather than an independent property of the market. It carries almost
+    no information and should not spend complexity budget as a CERR
+    threshold."""
 
     def efficiency(self, measure: EfficiencyMeasure) -> float | None:
         return (

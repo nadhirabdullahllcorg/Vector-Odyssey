@@ -302,7 +302,8 @@ def _data_quality(
         f"Levels observed        : {events.counts['levels_seen']}",
         f"Swings confirmed       : {events.counts['swings']}",
         f"Sweeps                 : {events.counts['sweeps']}",
-        f"Displacements          : {events.counts['displacements']}",
+        f"Displacement measures  : {events.counts['displacements_measured']}",
+        f"  qualified            : {events.counts['displacements']}",
         f"MSS                    : {events.counts['mss']}",
         f"CERR cycles            : {len(cycles)}",
         "",
@@ -324,6 +325,35 @@ def _data_quality(
         "```",
         "",
     ]
+    qualifications = events.displacement_qualifications
+    if qualifications:
+        lines += [
+            "",
+            "### Displacement qualification",
+            "",
+            "A measurement existing is not a displacement qualifying. The",
+            "first real run conflated the two and reported a 1:1",
+            "sweep-to-displacement ratio as a result.",
+            "",
+            "```",
+        ]
+        lines += [f"{name:<22}: {count}" for name, count in sorted(qualifications.items())]
+        reasons = events.displacement_failure_reasons
+        if reasons:
+            lines += [
+                "",
+                "Shortfalls (a leg can miss several clauses; these sum to more",
+                "than the number of failures):",
+                "",
+            ]
+            lines += [
+                f"  {count:>6}  {reason}"
+                for reason, count in sorted(
+                    reasons.items(), key=lambda item: (-item[1], item[0])
+                )[:15]
+            ]
+        lines += ["```", ""]
+
     if trading_days:
         lines[-1:] = [
             f"Trading days: `{trading_days[0]}` .. `{trading_days[-1]}`",
