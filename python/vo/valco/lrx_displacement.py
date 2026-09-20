@@ -65,6 +65,13 @@ class ExpansionDirection(Enum):
 class Qualification(Enum):
     PASS = "PASS"
     FAIL = "FAIL"
+    UNMEASURABLE = "UNMEASURABLE"
+    """The configured mode needed a value this leg could not produce --
+    velocity on a timeframe with no fixed length, body ratio on a leg
+    with no range. Distinct from FAIL on purpose: a leg that failed a
+    threshold and a leg that could not be measured against it are
+    different findings, and collapsing them would put both in the same
+    bucket of any report."""
 
     def __str__(self) -> str:
         return self.value
@@ -210,7 +217,9 @@ class DisplacementEvent:
     range_atr: float
     body_points: float
     body_atr: float
-    body_ratio: float
+    body_ratio: float | None
+    """None when the leg had no range -- body/range is undefined, not
+    zero."""
     wick_points: float
     net_move_points: float
     net_move_atr: float
@@ -221,10 +230,16 @@ class DisplacementEvent:
     """Total bars closing in the direction of travel, not just the
     longest run."""
     bar_count: int
-    elapsed_seconds: float
-    velocity_atr_per_minute: float
+    elapsed_seconds: float | None
+    """First bar's open to last bar's close. None on a timeframe with no
+    fixed length (MN1, CUSTOM), where a leg's duration is not a
+    constant."""
+    velocity_atr_per_minute: float | None
+    """None when elapsed time is unknowable. NOT 0.0, which would read as
+    a leg that went nowhere."""
     max_favorable_excursion: float
-    close_location: float
+    close_location: float | None
+    """None when the leg had no range."""
     consecutive_directional_bars: int
     gap: GapGeometry | None
     expansion_origin: float
@@ -248,13 +263,19 @@ class DisplacementEvent:
         return self.gap is not None
 
 
-def _close_location(direction: ExpansionDirection, close: float, high: float, low: float) -> float:
+def _close_location(
+    direction: ExpansionDirection, close: float, high: float, low: float
+) -> float | None:
     """Where the leg's final close sits in its range: 1.0 means it closed
     at the favourable extreme, 0.0 at the adverse one. A displacement
-    that closes mid-range travelled without committing."""
+    that closes mid-range travelled without committing.
+
+    None when the leg has no range at all. Returning 0.5 there would
+    assert "closed exactly mid-range, travelled without committing" --
+    a substantive claim about a leg that never moved."""
     span = high - low
     if span <= 0:
-        return 0.5
+        return None
     if direction is ExpansionDirection.UP:
         return (close - low) / span
     return (high - close) / span
@@ -280,14 +301,20 @@ def _qualify(
     *,
     range_atr: float,
     body_atr: float,
-    body_ratio: float,
+    body_ratio: float | None,
     net_move_atr: float,
     consecutive: int,
-    velocity: float,
+    velocity: float | None,
 ) -> tuple[Qualification, str]:
     """Apply the configured definition. Each clause states its own
-    shortfall so a FAIL is diagnostic rather than a verdict."""
+    shortfall so a FAIL is diagnostic rather than a verdict.
+
+    A clause whose input is None yields UNMEASURABLE rather than a
+    silent failure: the threshold was never actually tested, and saying
+    so is not the same as saying the leg fell short of it.
+    """
     clauses: list[tuple[bool, str]] = []
+    unmeasurable: list[str] = []
 
     def range_clause() -> tuple[bool, str]:
         return (
@@ -302,6 +329,9 @@ def _qualify(
         )
 
     def ratio_clause() -> tuple[bool, str]:
+        if body_ratio is None:
+            unmeasurable.append("body ratio undefined (leg has no range)")
+            return (True, "")
         return (
             body_ratio >= config.min_body_ratio,
             f"body ratio {body_ratio:.2f} below {config.min_body_ratio:.2f}",
@@ -314,6 +344,9 @@ def _qualify(
         )
 
     def velocity_clause() -> tuple[bool, str]:
+        if velocity is None:
+            unmeasurable.append("velocity undefined (leg duration unknowable)")
+            return (True, "")
         return (
             velocity >= config.min_velocity_atr_per_minute,
             f"velocity {velocity:.3f} ATR/min below "
@@ -339,6 +372,8 @@ def _qualify(
     else:  # COMBINED
         clauses = [range_clause(), ratio_clause(), net_clause()]
 
+    if unmeasurable:
+        return Qualification.UNMEASURABLE, "; ".join(unmeasurable)
     failures = [reason for ok, reason in clauses if not ok]
     if failures:
         return Qualification.FAIL, "; ".join(failures)
@@ -398,12 +433,27 @@ def measure_displacement(
     body_points = sum(abs(bar.close - bar.open) for bar in leg)
     total_range = sum(bar.high - bar.low for bar in leg)
     wick_points = max(0.0, total_range - body_points)
-    body_ratio = body_points / total_range if total_range > 0 else 0.0
+    body_ratio = body_points / total_range if total_range > 0 else None
 
-    elapsed_seconds = (last.open_time_utc - first.open_time_utc).total_seconds()
-    elapsed_minutes = elapsed_seconds / 60.0
+    # Open-to-open measures the gaps BETWEEN a leg's bars, not the leg.
+    # A one-bar leg spans zero that way -- and a one-bar leg is the
+    # classic displacement candle, so velocity read 0.00 for exactly the
+    # moves the VELOCITY mode exists to reward. An n-bar leg was
+    # measured n-1 bars long, inflating velocity by n/(n-1). The leg
+    # runs from the first bar's OPEN to the last bar's CLOSE, which is
+    # one timeframe past the last open.
+    bar_seconds = first.timeframe.seconds
+    elapsed_seconds = (
+        (last.open_time_utc - first.open_time_utc).total_seconds() + bar_seconds
+        if bar_seconds is not None
+        else None
+    )
     net_move_atr = net_move_points / atr_price
-    velocity = net_move_atr / elapsed_minutes if elapsed_minutes > 0 else 0.0
+    velocity = (
+        net_move_atr / (elapsed_seconds / 60.0)
+        if elapsed_seconds is not None and elapsed_seconds > 0
+        else None
+    )
 
     far = low if direction is ExpansionDirection.DOWN else high
     mfe = abs(far - start_price)

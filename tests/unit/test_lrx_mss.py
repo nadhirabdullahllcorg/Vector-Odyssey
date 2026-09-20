@@ -685,3 +685,39 @@ def test_mss_imports_no_swing_producer_and_no_confluence() -> None:
         "pivot" in name or ("swing" in name and name != "select_swing")
         for name in defined
     ), f"MSS defines its own structure logic: {sorted(defined)}"
+
+
+# ── data integrity regression ─────────────────────────────────────────────
+
+
+def test_an_unmeasurable_atr_distance_is_reported_as_none_not_zero() -> None:
+    """Regression. A reported 0.0 is indistinguishable from a break that
+    genuinely covered no ATR, and drags any average computed over the
+    column toward zero while still looking like data. The break itself is
+    unaffected -- only its ATR normalisation is unavailable."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_020.0, close=20_022.0))
+    bars.append(_bar(21, open_=20_022.0, high=20_023.0, low=19_990.0, close=19_992.0))
+    sweep = _sweep(20)
+    event = measure_displacement(
+        bars, 21, sweep, DisplacementConfig(atr_period=14), tick_size=_TICK
+    )
+    assert event is not None
+    bars.append(_bar(22, open_=19_992.0, high=19_994.0, low=19_960.0, close=19_965.0))
+
+    mss = _detect(bars, event, sweep, _low(), atr_period=500)
+
+    assert mss is not None
+    assert mss.break_distance_atr is None
+    assert mss.break_distance_points == pytest.approx(10.0)
+
+
+def test_a_measurable_atr_distance_is_a_real_number() -> None:
+    bars, event, sweep = _bearish()
+    bars.append(_bar(22, open_=19_992.0, high=19_994.0, low=19_960.0, close=19_965.0))
+
+    mss = _detect(bars, event, sweep, _low())
+
+    assert mss is not None
+    assert mss.break_distance_atr is not None
+    assert mss.break_distance_atr > 0.0

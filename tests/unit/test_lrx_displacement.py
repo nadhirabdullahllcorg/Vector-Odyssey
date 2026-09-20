@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from vo.market.bar import Bar
 from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
@@ -475,3 +477,113 @@ def test_distance_from_sweep_measures_reach_beyond_the_level_not_leg_range() -> 
 
     assert event is not None
     assert event.distance_from_sweep == abs(event.low - _LEVEL)
+
+
+# ── data integrity: measured, missing, and genuinely zero ─────────────────
+#
+# Added by the pre-Inefficiency data-integrity audit. The suite above
+# verified that these fields EXIST; none of it verified what they say
+# when the thing they measure is unavailable, which is how velocity spent
+# its whole life being wrong without a red test.
+
+
+def test_elapsed_time_spans_the_leg_not_the_gaps_between_its_opens() -> None:
+    """Open-to-open measures the intervals BETWEEN a leg's bars. A leg
+    runs from its first bar's open to its last bar's CLOSE, which is one
+    timeframe past the last open -- so an n-bar M1 leg lasts n minutes,
+    not n-1."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_020.0, close=20_022.0))
+    bars.append(_bar(21, open_=20_022.0, high=20_023.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.bar_count == 2
+    assert event.elapsed_seconds == 60.0 * event.bar_count
+    # The old formula. Kept explicit so a regression names itself.
+    assert event.elapsed_seconds != 60.0 * (event.bar_count - 1)
+
+
+def test_a_leg_never_reports_zero_elapsed_time() -> None:
+    """The defect this replaces: a one-bar leg spanned zero seconds, so
+    velocity read 0.00 -- the slowest possible value -- for the explosive
+    single candle that is the archetypal displacement."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 20, _sweep(19))
+
+    assert event is not None
+    assert event.elapsed_seconds is not None
+    assert event.elapsed_seconds > 0.0
+
+
+def test_velocity_is_net_movement_over_the_legs_real_duration() -> None:
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_020.0, close=20_022.0))
+    bars.append(_bar(21, open_=20_022.0, high=20_023.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.velocity_atr_per_minute is not None
+    assert event.elapsed_seconds is not None
+    assert event.velocity_atr_per_minute == pytest.approx(
+        event.net_move_atr / (event.elapsed_seconds / 60.0)
+    )
+    # Two bars, two minutes -- not one.
+    assert event.velocity_atr_per_minute == pytest.approx(event.net_move_atr / 2.0)
+
+
+def test_velocity_qualification_accepts_a_fast_leg() -> None:
+    """Under the old arithmetic a short sharp leg could be scored against
+    an elapsed time shorter than it really took, and a one-bar leg was
+    rejected outright. Both are qualification-affecting, not cosmetic."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_020.0, close=20_022.0))
+    bars.append(_bar(21, open_=20_022.0, high=20_023.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20), mode=QualificationMode.VELOCITY)
+
+    assert event is not None
+    assert event.qualification is Qualification.PASS
+
+
+def test_a_true_zero_survives_as_zero() -> None:
+    """A marubozu genuinely has no wick. Missing values became None in
+    this audit; measurements that really are zero must stay zero."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_050.0, high=20_050.0, low=20_020.0, close=20_020.0))
+    bars.append(_bar(21, open_=20_020.0, high=20_020.0, low=19_990.0, close=19_990.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.wick_points == 0.0
+    assert event.body_ratio == pytest.approx(1.0)
+    assert event.close_location == pytest.approx(1.0)
+
+
+def test_qualification_separates_unmeasurable_from_failed() -> None:
+    """Three outcomes, not two: the threshold was met, the threshold was
+    tested and missed, or the threshold was never testable. A report that
+    merged the last two would bury them in one bucket."""
+    assert {q.value for q in Qualification} == {"PASS", "FAIL", "UNMEASURABLE"}
+    assert Qualification.UNMEASURABLE is not Qualification.FAIL
+
+
+def test_a_failed_leg_still_carries_the_measurements_it_could_take() -> None:
+    """A FAIL that erased its own numbers would make every near-miss
+    invisible."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_000.0, high=20_001.0, low=19_997.0, close=19_998.0))
+
+    event = _measure(bars, 20, _sweep(19))
+
+    assert event is not None
+    assert event.qualification is Qualification.FAIL
+    assert event.range_atr > 0.0
+    assert event.elapsed_seconds is not None
+    assert event.velocity_atr_per_minute is not None
+    assert event.qualification_reason != ""
