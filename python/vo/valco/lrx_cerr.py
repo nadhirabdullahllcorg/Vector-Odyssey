@@ -580,7 +580,20 @@ def observe_reversal(
     would make the phase meaningless. A reversal pointing AGAINST the
     expansion invalidates by name rather than being reinterpreted.
     """
-    if cycle.state is not CerrState.RETRACEMENT or cycle.expansion is None:
+    if (
+        cycle.state is not CerrState.RETRACEMENT
+        or cycle.expansion is None
+        or cycle.retracement is None
+    ):
+        return cycle
+
+    # An MSS that broke BEFORE the retracement began cannot be the
+    # reversal OF that retracement, however well its direction happens
+    # to match. Being in the right state is not the same as the evidence
+    # arriving in the right order, and without this a caller replaying
+    # events out of sequence would confirm a cycle from a shift that
+    # predates the pullback it supposedly ends.
+    if mss.break_time < cycle.retracement.start_time:
         return cycle
 
     if not reversal_matches(cycle, sweep, displacement, mss):

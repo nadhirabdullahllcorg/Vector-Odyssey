@@ -97,7 +97,7 @@ def _consolidation() -> ConsolidationEvent:
         range_atr=1.0,
         net_move_points=0.0,
         net_move_atr=0.0,
-        efficiency_ratio=0.05,
+        kaufman_efficiency_ratio=0.05,
         body_efficiency_ratio=0.05,
         efficiency_measure=EfficiencyMeasure.KAUFMAN,
         bar_count=20,
@@ -635,3 +635,94 @@ def test_identical_inputs_produce_identical_cycles() -> None:
         )
 
     assert all(run == runs[0] for run in runs)
+
+
+# ── causality ─────────────────────────────────────────────────────────────
+
+
+def test_every_transition_time_is_a_completed_bars_label() -> None:
+    """A cycle may only move on information that already exists. Each
+    transition's time must be the label of a bar the machine had
+    actually been given."""
+    bars, cycle = _retraced()
+    up_leg = _bullish_breakout()[1]
+    confirmed = observe_reversal(
+        cycle, _sweep(38, LevelSide.SELL_SIDE), up_leg, _mss(MssDirection.BULLISH, break_index=23)
+    )
+
+    labels = {bar.open_time_utc for bar in bars} | {_at(23)}
+    for transition in confirmed.transitions:
+        assert transition.transition_time in labels, transition
+
+
+def test_transition_times_never_go_backwards() -> None:
+    cycle = _retraced()[1]
+    up_leg = _bullish_breakout()[1]
+    confirmed = observe_reversal(
+        cycle, _sweep(38, LevelSide.SELL_SIDE), up_leg, _mss(MssDirection.BULLISH, break_index=23)
+    )
+
+    times = [t.transition_time for t in confirmed.transitions]
+    assert times == sorted(times)
+
+
+def test_observing_a_bar_never_reads_past_it() -> None:
+    """Truncating the series immediately after the observed bar changes
+    nothing -- proof that no later bar contributed to the transition."""
+    bars, cycle = _expanded()
+    bars.append(_bar(22, open_=20_058.0, high=20_059.0, low=20_040.0, close=20_042.0))
+    bars.append(_bar(23, open_=20_042.0, high=20_043.0, low=19_900.0, close=19_905.0))
+
+    full = observe_bar(cycle, bars, 22, _config(), tick_size=_TICK)
+    truncated = observe_bar(cycle, bars[:23], 22, _config(), tick_size=_TICK)
+
+    assert full == truncated
+    assert full.state is CerrState.RETRACEMENT
+
+
+def test_a_reversal_whose_shift_predates_the_retracement_is_ignored() -> None:
+    """Being in the right STATE is not the same as the evidence arriving
+    in the right ORDER. An MSS that broke before the pullback began
+    cannot be the reversal of it, however well its direction matches."""
+    _bars, cycle = _retraced()
+    up_leg = _bullish_breakout()[1]
+    assert cycle.retracement is not None
+    assert cycle.retracement.start_time == _at(22)
+
+    stale = observe_reversal(
+        cycle,
+        _sweep(38, LevelSide.SELL_SIDE),
+        up_leg,
+        _mss(MssDirection.BULLISH, break_index=21),
+    )
+    assert stale == cycle
+    assert stale.state is CerrState.RETRACEMENT
+
+    timely = observe_reversal(
+        cycle,
+        _sweep(38, LevelSide.SELL_SIDE),
+        up_leg,
+        _mss(MssDirection.BULLISH, break_index=22),
+    )
+    assert timely.state is CerrState.REVERSAL_CONFIRMED
+
+
+def test_a_bar_that_both_extends_and_retraces_stays_in_expansion() -> None:
+    """A KNOWN LIMITATION, pinned so it is a decision rather than a
+    surprise. Within one bar the order of the high and the low is
+    unknowable without tick data. The machine treats such a bar as
+    extension, which keeps the cycle in EXPANSION rather than opening a
+    retracement that may never have happened. The conservative choice
+    delays a phase change; the opposite choice would invent one."""
+    bars, cycle = _expanded()
+    extreme = cycle.expansion.extreme_price
+    bars.append(
+        _bar(22, open_=20_058.0, high=extreme + 20.0, low=extreme - 40.0, close=20_050.0)
+    )
+
+    after = observe_bar(cycle, bars, 22, _config(), tick_size=_TICK)
+
+    assert after.state is CerrState.EXPANSION
+    assert after.expansion is not None
+    assert after.expansion.extreme_price == extreme + 20.0
+    assert after.retracement is None

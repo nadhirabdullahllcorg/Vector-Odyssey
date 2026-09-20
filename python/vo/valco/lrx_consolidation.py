@@ -15,7 +15,16 @@ does not turn range_high/range_low into liquidity levels: those are
 geometry, and the Reference Level and Liquidity engines remain solely
 responsible for deciding what price is a level.
 
-TWO EFFICIENCY RATIOS, RECORDED TOGETHER, ON PURPOSE. VO already has a
+TWO EFFICIENCY RATIOS, NAMED APART, RECORDED TOGETHER.
+
+    kaufman_efficiency_ratio   |net close-to-close move| / sum|close-to-close move|
+    body_efficiency_ratio      |last close - first open| / sum|close - open|
+
+They measure different things -- path efficiency versus body efficiency
+-- and are not interchangeable, so neither is ever called plainly
+"efficiency_ratio" on a record that carries both. A report column that
+could be either is a result nobody can interpret afterwards.
+ VO already has a
 calibrated Kaufman ER (vo.observation.efficiency_ratio) driving the
 regime engine and entry timing. The CERR specification names a
 different, body-anchored formula. Shipping the second as *the*
@@ -139,8 +148,12 @@ class ConsolidationMeasurement:
     """Sum of per-bar body movement -- the distance price actually
     travelled, against which net movement is judged."""
 
-    efficiency_ratio: float | None
-    """Kaufman, close-to-close. None when history is too short."""
+    kaufman_efficiency_ratio: float | None
+    """Directional efficiency of the price PATH: |net close-to-close
+    displacement| / sum|close-to-close movement|. None when history is
+    too short. Never named plainly "efficiency_ratio" on a record that
+    carries two of them -- a report column that could be either is a
+    result nobody can interpret afterwards."""
     body_efficiency_ratio: float | None
     """The CERR specification's formula. None when its denominator is
     zero, i.e. every bar closed exactly at its open -- undefined, not
@@ -151,7 +164,7 @@ class ConsolidationMeasurement:
 
     def efficiency(self, measure: EfficiencyMeasure) -> float | None:
         return (
-            self.efficiency_ratio
+            self.kaufman_efficiency_ratio
             if measure is EfficiencyMeasure.KAUFMAN
             else self.body_efficiency_ratio
         )
@@ -195,9 +208,12 @@ class ConsolidationEvent:
     net_move_points: float
     net_move_atr: float | None
 
-    efficiency_ratio: float | None
+    kaufman_efficiency_ratio: float | None
     body_efficiency_ratio: float | None
     efficiency_measure: EfficiencyMeasure
+    """Which of the two ratios qualification used. Recorded on the event
+    so a result can never be read against the wrong one. The YAML key
+    when this reaches config is `consolidation_efficiency_measure`."""
     bar_count: int
 
     qualification: ConsolidationQualification
@@ -279,7 +295,9 @@ def measure_consolidation(
             abs(net_move_points) / scaled if scaled is not None else None
         ),
         total_path_points=total_path_points,
-        efficiency_ratio=efficiency_ratio(bars, index, period=len(window) - 1),
+        kaufman_efficiency_ratio=efficiency_ratio(
+            bars, index, period=len(window) - 1
+        ),
         body_efficiency_ratio=body_er,
         mean_range_points=mean_range_points,
         mean_range_atr=(
@@ -396,7 +414,7 @@ def build_consolidation_event(verdict: ConsolidationVerdict) -> ConsolidationEve
         range_atr=m.range_atr,
         net_move_points=m.net_move_points,
         net_move_atr=m.net_move_atr,
-        efficiency_ratio=m.efficiency_ratio,
+        kaufman_efficiency_ratio=m.kaufman_efficiency_ratio,
         body_efficiency_ratio=m.body_efficiency_ratio,
         efficiency_measure=verdict.efficiency_measure,
         bar_count=m.bar_count,

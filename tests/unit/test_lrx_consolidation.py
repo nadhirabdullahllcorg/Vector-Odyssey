@@ -310,7 +310,7 @@ def test_both_efficiency_ratios_are_always_recorded() -> None:
     measurement = measure_consolidation(_chop(30), 29, _config(), tick_size=_TICK)
 
     assert measurement is not None
-    assert measurement.efficiency_ratio is not None
+    assert measurement.kaufman_efficiency_ratio is not None
     assert measurement.body_efficiency_ratio is not None
 
 
@@ -320,7 +320,7 @@ def test_the_configured_measure_selects_which_ratio_binds() -> None:
     assert measurement is not None
     assert (
         measurement.efficiency(EfficiencyMeasure.KAUFMAN)
-        == measurement.efficiency_ratio
+        == measurement.kaufman_efficiency_ratio
     )
     assert (
         measurement.efficiency(EfficiencyMeasure.BODY)
@@ -339,9 +339,9 @@ def test_a_trend_is_directional_under_both_measures() -> None:
     measurement = measure_consolidation(_trend(30), 29, _config(), tick_size=_TICK)
 
     assert measurement is not None
-    assert measurement.efficiency_ratio is not None
+    assert measurement.kaufman_efficiency_ratio is not None
     assert measurement.body_efficiency_ratio is not None
-    assert measurement.efficiency_ratio > 0.9
+    assert measurement.kaufman_efficiency_ratio > 0.9
     assert measurement.body_efficiency_ratio > 0.9
 
 
