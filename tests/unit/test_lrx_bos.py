@@ -1,9 +1,12 @@
 """vo.valco.lrx_bos -- did the shift become a trend?
 
-Covers: continuation in both directions, the rule that a BOS may not
-re-count the MSS's own swing, one-break-per-level across a run of bars,
-sequence numbering, eligibility and availability, unusable ATR, and the
-separation from MSS that makes the two independently measurable."""
+Audit case list, mirroring MSS: continuation in both directions, the
+rule that a BOS may not re-count the shift's own swing, one break per
+level across a run of bars, sequence numbering, both structure cutoffs,
+eligibility and availability, all five confirmation modes, the boundary
+cases where a break lands exactly on a level or a threshold, gaps,
+rejection attribution, determinism, and the shared break predicate that
+keeps BOS and MSS from drifting apart."""
 
 from __future__ import annotations
 
@@ -16,7 +19,16 @@ from vo.market.bar import Bar
 from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.observation.swings import SwingLevel, SwingStatus, SwingType
-from vo.valco.lrx_bos import BosConfig, detect_bos, detect_bos_run
+from vo.valco.lrx_bos import (
+    BosConfig,
+    BosQualification,
+    BosRejectionReason,
+    StructureCutoff,
+    detect_bos,
+    detect_bos_run,
+    eligible_swings,
+    evaluate_bos,
+)
 from vo.valco.lrx_mss import (
     ConfirmationMethod,
     MssDirection,
@@ -31,6 +43,8 @@ _INSTRUMENT = InstrumentId(
 )
 _START = datetime(2026, 9, 21, 13, 0, tzinfo=UTC)
 _TICK = 0.01
+_MSS_SWING = 19_975.0
+_NEXT_LOW = 19_950.0
 
 
 def _at(minute: int) -> datetime:
@@ -81,7 +95,7 @@ def _swing(
 
 def _mss(
     *,
-    swing_price: float = 19_975.0,
+    broken_price: float = _MSS_SWING,
     break_index: int = 22,
     direction: MssDirection = MssDirection.BEARISH,
     swing_id: str = "mss-swing",
@@ -93,7 +107,7 @@ def _mss(
         direction=direction,
         qualification=MssQualification.PASS,
         broken_swing_id=swing_id,
-        broken_price=swing_price,
+        broken_price=broken_price,
         swing_event_time=_at(16),
         swing_confirmation_time=_at(18),
         selection_method=SwingSelection.MOST_RECENT,
@@ -107,6 +121,10 @@ def _mss(
         break_distance_atr=1.0,
         confirmation_method=ConfirmationMethod.CANDLE_CLOSE,
     )
+
+
+def _next_low(price: float = _NEXT_LOW, minute: int = 14) -> list[CanonicalSwing]:
+    return [_swing("low-deeper", SwingType.LOW, price, confirmed_minute=minute)]
 
 
 def _detect(bars, mss, swings, index=None, **overrides):
@@ -123,45 +141,89 @@ def _detect(bars, mss, swings, index=None, **overrides):
     )
 
 
+def _verdict(bars, mss, swings, index=None, **overrides):
+    config = BosConfig()
+    if overrides:
+        config = dataclasses.replace(config, **overrides)
+    return evaluate_bos(
+        bars,
+        len(bars) - 1 if index is None else index,
+        mss,
+        swings,
+        config,
+        tick_size=_TICK,
+    )
+
+
 # ── continuation, both directions ─────────────────────────────────────────
 
 
 def test_a_lower_low_after_a_bearish_shift_is_a_continuation() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    bos = _detect(bars, _mss(), swings)
+    bos = _detect(bars, _mss(), _next_low())
 
     assert bos is not None
     assert bos.direction is MssDirection.BEARISH
-    assert bos.swing_id == "low-deeper"
+    assert bos.qualification is BosQualification.PASS
+    assert bos.broken_swing_id == "low-deeper"
+    assert bos.broken_price == _NEXT_LOW
     assert bos.sequence == 1
     assert bos.bars_since_mss == 1
     assert bos.distance_from_mss_swing == pytest.approx(25.0)
     assert bos.mss_id == "MSS:test"
     assert bos.sweep_id == "SWEEP:test"
+    assert bos.displacement_id == "DISP:test"
 
 
 def test_a_higher_high_after_a_bullish_shift_is_a_continuation() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=20_040.0, high=20_075.0, low=20_038.0, close=20_070.0))
-    mss = _mss(swing_price=20_025.0, direction=MssDirection.BULLISH)
+    mss = _mss(broken_price=20_025.0, direction=MssDirection.BULLISH)
     swings = [_swing("high-higher", SwingType.HIGH, 20_050.0, confirmed_minute=14)]
 
     bos = _detect(bars, mss, swings)
 
     assert bos is not None
     assert bos.direction is MssDirection.BULLISH
-    assert bos.swing_id == "high-higher"
+    assert bos.broken_swing_id == "high-higher"
+
+
+def test_direction_is_inherited_from_the_shift_not_re_derived() -> None:
+    """A second opinion on direction could disagree with the shift it
+    claims to continue. BOS has no direction logic of its own."""
+    import ast
+    import inspect
+
+    import vo.valco.lrx_bos as module
+
+    source = inspect.getsource(module)
+    assert "expected_direction" not in source
+    assert "LevelSide" not in source
+
+    tree = ast.parse(source)
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    for banned in (
+        "vo.observation.hurst",
+        "vo.observation.regime",
+        "vo.compliance.news_gate",
+    ):
+        assert banned not in imported, banned
 
 
 def test_price_holding_above_the_next_low_is_not_a_continuation() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_955.0, close=19_958.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    assert _detect(bars, _mss(), swings) is None
+    verdict = _verdict(bars, _mss(), _next_low())
+    assert verdict.rejection_reason is BosRejectionReason.NOT_BROKEN
+    assert verdict.candidate_swing_id == "low-deeper"
+    assert verdict.event is None
 
 
 # ── the rule that keeps BOS from re-counting the MSS ──────────────────────
@@ -169,13 +231,13 @@ def test_price_holding_above_the_next_low_is_not_a_continuation() -> None:
 
 def test_the_swing_the_mss_broke_cannot_be_broken_again_as_a_bos() -> None:
     """Otherwise every bar that stayed below the shift's own level would
-    log a fresh continuation, and the BOS count would measure elapsed
-    bars rather than structure."""
+    log a fresh continuation, and the count would measure elapsed bars."""
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("mss-swing", SwingType.LOW, 19_975.0, confirmed_minute=18)]
+    swings = [_swing("mss-swing", SwingType.LOW, _MSS_SWING, confirmed_minute=18)]
 
-    assert _detect(bars, _mss(), swings) is None
+    verdict = _verdict(bars, _mss(), swings)
+    assert verdict.rejection_reason is BosRejectionReason.NO_ELIGIBLE_SWING
 
 
 def test_a_swing_short_of_the_mss_level_is_not_a_continuation() -> None:
@@ -183,12 +245,11 @@ def test_a_swing_short_of_the_mss_level_is_not_a_continuation() -> None:
     it -- breaking it carries structure nowhere new."""
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("low-shallow", SwingType.LOW, 19_990.0, confirmed_minute=14)]
+    shallow = [_swing("low-shallow", SwingType.LOW, 19_990.0, confirmed_minute=14)]
 
-    assert _detect(bars, _mss(), swings) is None
+    assert _detect(bars, _mss(), shallow) is None
     # ...and the looser definition exists only so that can be measured.
-    loose = _detect(bars, _mss(), swings, require_beyond_mss_swing=False)
-    assert loose is not None
+    assert _detect(bars, _mss(), shallow, require_beyond_mss_swing=False) is not None
 
 
 def test_the_nearest_untaken_level_is_taken_first() -> None:
@@ -197,14 +258,94 @@ def test_the_nearest_untaken_level_is_taken_first() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_900.0, close=19_905.0))
     swings = [
-        _swing("low-near", SwingType.LOW, 19_950.0, confirmed_minute=14),
+        _swing("low-near", SwingType.LOW, _NEXT_LOW, confirmed_minute=14),
         _swing("low-far", SwingType.LOW, 19_920.0, confirmed_minute=12),
     ]
 
     bos = _detect(bars, _mss(), swings)
 
     assert bos is not None
-    assert bos.swing_id == "low-near"
+    assert bos.broken_swing_id == "low-near"
+
+
+# ── structure cutoff: the one real ambiguity ──────────────────────────────
+
+
+def test_at_mss_refuses_structure_the_move_itself_created() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    mid_move = _next_low(minute=23)
+
+    verdict = _verdict(bars, _mss(), mid_move, cutoff=StructureCutoff.AT_MSS)
+    assert verdict.rejection_reason is BosRejectionReason.NO_ELIGIBLE_SWING
+
+
+def test_at_break_bar_admits_it_and_records_which_rule_applied() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    mid_move = _next_low(minute=23)
+
+    bos = _detect(bars, _mss(), mid_move, cutoff=StructureCutoff.AT_BREAK_BAR)
+
+    assert bos is not None
+    assert bos.structure_cutoff is StructureCutoff.AT_BREAK_BAR
+
+
+def test_the_default_cutoff_is_the_strict_one() -> None:
+    assert BosConfig().cutoff is StructureCutoff.AT_MSS
+
+
+def test_neither_cutoff_admits_a_swing_confirmed_after_the_break_bar() -> None:
+    """The looser rule is looser, not absent. A swing confirmed at bar
+    24 is not knowable when bar 23 closes, under either setting."""
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    future = _next_low(minute=24)
+
+    for cutoff in StructureCutoff:
+        assert _detect(bars, _mss(), future, index=23, cutoff=cutoff) is None, cutoff
+
+
+def test_a_broken_swing_is_not_eligible() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    gone = [
+        _swing(
+            "low-gone",
+            SwingType.LOW,
+            _NEXT_LOW,
+            confirmed_minute=14,
+            status=SwingStatus.BROKEN,
+        )
+    ]
+
+    assert _detect(bars, _mss(), gone) is None
+
+
+def test_a_swing_of_the_opposing_type_is_not_a_continuation() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    highs = [_swing("high-a", SwingType.HIGH, _NEXT_LOW, confirmed_minute=14)]
+
+    assert _detect(bars, _mss(), highs) is None
+
+
+def test_eligibility_is_inspectable_on_its_own() -> None:
+    swings = [
+        _swing("low-deeper", SwingType.LOW, _NEXT_LOW, confirmed_minute=14),
+        _swing("low-shallow", SwingType.LOW, 19_990.0, confirmed_minute=14),
+        _swing("mss-swing", SwingType.LOW, _MSS_SWING, confirmed_minute=18),
+    ]
+
+    strict = eligible_swings(
+        swings, _mss(), cutoff_at=_at(22), require_beyond=True
+    )
+    loose = eligible_swings(
+        swings, _mss(), cutoff_at=_at(22), require_beyond=False
+    )
+
+    assert [s.swing_id for s in strict] == ["low-deeper"]
+    assert sorted(s.swing_id for s in loose) == ["low-deeper", "low-shallow"]
 
 
 # ── one break per level ───────────────────────────────────────────────────
@@ -213,15 +354,14 @@ def test_the_nearest_untaken_level_is_taken_first() -> None:
 def test_a_consumed_level_is_not_broken_twice() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    assert _detect(bars, _mss(), swings) is not None
+    assert _detect(bars, _mss(), _next_low()) is not None
     assert (
         detect_bos(
             bars,
             23,
             _mss(),
-            swings,
+            _next_low(),
             BosConfig(),
             tick_size=_TICK,
             already_broken=["low-deeper"],
@@ -238,9 +378,8 @@ def test_a_run_of_bars_below_one_level_logs_one_continuation() -> None:
         (25, 19_925.0, 19_931.0),
     ):
         bars.append(_bar(minute, open_=19_940.0, high=19_942.0, low=low, close=close))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    events = detect_bos_run(bars, _mss(), swings, BosConfig(), tick_size=_TICK)
+    events = detect_bos_run(bars, _mss(), _next_low(), BosConfig(), tick_size=_TICK)
 
     assert len(events) == 1
     assert events[0].break_index == 23
@@ -251,70 +390,35 @@ def test_successive_levels_are_numbered_in_sequence() -> None:
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_940.0, close=19_945.0))
     bars.append(_bar(24, open_=19_945.0, high=19_947.0, low=19_910.0, close=19_915.0))
     swings = [
-        _swing("low-near", SwingType.LOW, 19_950.0, confirmed_minute=14),
+        _swing("low-near", SwingType.LOW, _NEXT_LOW, confirmed_minute=14),
         _swing("low-far", SwingType.LOW, 19_920.0, confirmed_minute=12),
     ]
 
     events = detect_bos_run(bars, _mss(), swings, BosConfig(), tick_size=_TICK)
 
-    assert [e.swing_id for e in events] == ["low-near", "low-far"]
+    assert [e.broken_swing_id for e in events] == ["low-near", "low-far"]
     assert [e.sequence for e in events] == [1, 2]
     assert [e.bars_since_mss for e in events] == [1, 2]
-    assert events[0].bos_id != events[1].bos_id
+    assert len({e.bos_id for e in events}) == 2
 
 
-# ── eligibility, availability, bounds ─────────────────────────────────────
-
-
-def test_a_swing_confirmed_after_the_shift_is_not_eligible() -> None:
+def test_a_run_stops_at_until_index() -> None:
     bars = _baseline(23)
-    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    late = [_swing("low-late", SwingType.LOW, 19_950.0, confirmed_minute=23)]
-
-    assert _detect(bars, _mss(break_index=22), late) is None
-
-
-def test_a_broken_swing_is_not_eligible() -> None:
-    bars = _baseline(23)
-    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_940.0, close=19_945.0))
+    bars.append(_bar(24, open_=19_945.0, high=19_947.0, low=19_910.0, close=19_915.0))
     swings = [
-        _swing(
-            "low-gone",
-            SwingType.LOW,
-            19_950.0,
-            confirmed_minute=14,
-            status=SwingStatus.BROKEN,
-        )
+        _swing("low-near", SwingType.LOW, _NEXT_LOW, confirmed_minute=14),
+        _swing("low-far", SwingType.LOW, 19_920.0, confirmed_minute=12),
     ]
 
-    assert _detect(bars, _mss(), swings) is None
+    events = detect_bos_run(
+        bars, _mss(), swings, BosConfig(), tick_size=_TICK, until_index=23
+    )
+
+    assert [e.broken_swing_id for e in events] == ["low-near"]
 
 
-def test_a_swing_of_the_opposing_type_is_not_a_continuation() -> None:
-    bars = _baseline(23)
-    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    highs = [_swing("high-a", SwingType.HIGH, 19_950.0, confirmed_minute=14)]
-
-    assert _detect(bars, _mss(), highs) is None
-
-
-def test_a_continuation_cannot_predate_the_shift() -> None:
-    bars = _baseline(23)
-    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
-
-    assert _detect(bars, _mss(), swings, index=22) is None
-    assert _detect(bars, _mss(), swings, index=10) is None
-
-
-def test_no_eligible_swing_produces_nothing() -> None:
-    bars = _baseline(23)
-    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-
-    assert _detect(bars, _mss(), []) is None
-
-
-# ── confirmation methods are shared with MSS, not restated ────────────────
+# ── confirmation modes, shared with MSS ───────────────────────────────────
 
 
 def test_bos_and_mss_agree_on_what_broke_means() -> None:
@@ -323,29 +427,199 @@ def test_bos_and_mss_agree_on_what_broke_means() -> None:
     show it."""
     import inspect
 
-    import vo.valco.lrx_bos as bos_module
+    import vo.valco.lrx_bos as module
 
-    source = inspect.getsource(bos_module)
+    source = inspect.getsource(module)
     assert "broke_level" in source
     assert "def broke_level" not in source
 
 
-def test_wick_confirms_where_close_does_not() -> None:
+def test_wick_break_confirms_where_candle_close_does_not() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_945.0, close=19_955.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.CANDLE_CLOSE) is None
-    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.WICK_BREAK) is not None
+    assert _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.CANDLE_CLOSE) is None
+    wick = _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.WICK_BREAK)
+    assert wick is not None
+    assert wick.break_price == 19_945.0
 
 
-def test_an_atr_threshold_with_no_atr_available_declines_rather_than_guesses() -> None:
+def test_body_close_rejects_a_bar_that_opened_above_the_level() -> None:
     bars = _baseline(23)
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
-    swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    config = BosConfig(
-        method=ConfirmationMethod.CLOSE_PLUS_ATR_THRESHOLD, min_break_atr=0.5, atr_period=500
+    assert _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.CANDLE_CLOSE) is not None
+    assert _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.BODY_CLOSE) is None
+
+
+def test_close_plus_min_distance_needs_the_extra_points() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_940.0, close=19_945.0))
+    method = ConfirmationMethod.CLOSE_PLUS_MIN_DISTANCE
+
+    assert _detect(bars, _mss(), _next_low(), method=method, min_break_points=3.0) is not None
+    assert _detect(bars, _mss(), _next_low(), method=method, min_break_points=8.0) is None
+
+
+def test_every_confirmation_mode_is_reachable_and_recorded() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_930.0, high=19_932.0, low=19_900.0, close=19_905.0))
+
+    for method in ConfirmationMethod:
+        bos = _detect(
+            bars,
+            _mss(),
+            _next_low(),
+            method=method,
+            min_break_points=1.0,
+            min_break_atr=0.1,
+        )
+        assert bos is not None, method
+        assert bos.confirmation_method is method
+
+
+def test_an_atr_threshold_with_no_atr_declines_rather_than_guessing() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+
+    verdict = _verdict(
+        bars,
+        _mss(),
+        _next_low(),
+        method=ConfirmationMethod.CLOSE_PLUS_ATR_THRESHOLD,
+        min_break_atr=0.5,
+        atr_period=500,
     )
-    assert detect_bos(bars, 23, _mss(), swings, config, tick_size=_TICK) is None
-    assert _detect(bars, _mss(), swings) is not None
+    assert verdict.rejection_reason is BosRejectionReason.ATR_UNAVAILABLE
+    assert verdict.candidate_swing_id == "low-deeper"
+
+
+def test_an_unmeasurable_atr_distance_is_reported_as_none_not_zero() -> None:
+    """A reported 0.0 would be indistinguishable from a break that
+    genuinely covered no ATR, and would drag any average computed over
+    it toward zero while looking like data."""
+    bars = _baseline(3)
+    bars.append(_bar(3, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+    mss = _mss(break_index=2)
+
+    bos = _detect(bars, mss, _next_low(minute=1), atr_period=500)
+
+    assert bos is not None
+    assert bos.break_distance_atr is None
+    assert bos.break_distance_points > 0.0
+
+
+# ── boundaries: touch, one tick, exact threshold, gap ─────────────────────
+
+
+def test_an_exact_touch_of_the_level_is_not_a_break() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=_NEXT_LOW, close=19_958.0))
+
+    assert _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.WICK_BREAK) is None
+
+
+def test_one_tick_beyond_the_level_is_a_break() -> None:
+    bars = _baseline(23)
+    bars.append(
+        _bar(23, open_=19_960.0, high=19_962.0, low=_NEXT_LOW - _TICK, close=19_958.0)
+    )
+
+    bos = _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.WICK_BREAK)
+    assert bos is not None
+    assert bos.break_distance_points == pytest.approx(_TICK)
+
+
+def test_a_close_exactly_at_the_level_is_not_a_break() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_940.0, close=_NEXT_LOW))
+
+    assert _detect(bars, _mss(), _next_low(), method=ConfirmationMethod.CANDLE_CLOSE) is None
+
+
+def test_a_close_exactly_at_the_threshold_is_not_a_break() -> None:
+    bars = _baseline(23)
+    bars.append(
+        _bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=_NEXT_LOW - 5.0)
+    )
+    method = ConfirmationMethod.CLOSE_PLUS_MIN_DISTANCE
+
+    assert _detect(bars, _mss(), _next_low(), method=method, min_break_points=5.0) is None
+
+
+def test_a_bar_gapping_wholly_through_the_level_is_a_break() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_920.0, high=19_925.0, low=19_900.0, close=19_905.0))
+
+    for method in (
+        ConfirmationMethod.WICK_BREAK,
+        ConfirmationMethod.CANDLE_CLOSE,
+        ConfirmationMethod.BODY_CLOSE,
+    ):
+        assert _detect(bars, _mss(), _next_low(), method=method) is not None, method
+
+
+# ── bounds and determinism ────────────────────────────────────────────────
+
+
+def test_a_continuation_cannot_predate_the_shift() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+
+    for index in (22, 10):
+        verdict = _verdict(bars, _mss(), _next_low(), index=index)
+        assert verdict.rejection_reason is BosRejectionReason.BEFORE_SHIFT
+
+
+def test_an_index_past_the_series_is_refused() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+
+    verdict = _verdict(bars, _mss(), _next_low(), index=len(bars) + 5)
+    assert verdict.rejection_reason is BosRejectionReason.BEFORE_SHIFT
+
+
+def test_no_eligible_swing_produces_nothing() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+
+    verdict = _verdict(bars, _mss(), [])
+    assert verdict.rejection_reason is BosRejectionReason.NO_ELIGIBLE_SWING
+    assert verdict.candidate_swing_id is None
+
+
+def test_the_event_is_knowable_on_the_bar_that_produced_it() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_930.0, close=19_935.0))
+
+    bos = _detect(bars, _mss(), _next_low())
+
+    assert bos is not None
+    assert bos.confirmation_at_utc == bos.event_at_utc == bos.break_time == _at(23)
+
+
+def test_identical_inputs_produce_identical_output() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_900.0, close=19_905.0))
+    swings = [
+        _swing("low-near", SwingType.LOW, _NEXT_LOW, confirmed_minute=14),
+        _swing("low-far", SwingType.LOW, 19_920.0, confirmed_minute=12),
+    ]
+
+    runs = [_detect(bars, _mss(), swings) for _ in range(5)]
+    assert all(run is not None for run in runs)
+    assert all(run == runs[0] for run in runs)
+
+    sequences = [
+        detect_bos_run(bars, _mss(), swings, BosConfig(), tick_size=_TICK)
+        for _ in range(5)
+    ]
+    assert all(seq == sequences[0] for seq in sequences)
+
+
+def test_rejections_are_deterministic_too() -> None:
+    bars = _baseline(23)
+    bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_955.0, close=19_958.0))
+
+    runs = [_verdict(bars, _mss(), _next_low()) for _ in range(5)]
+    assert all(run == runs[0] for run in runs)

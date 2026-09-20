@@ -205,7 +205,11 @@ class MssEvent:
     break_price: float
     break_time: datetime
     break_distance_points: float
-    break_distance_atr: float
+    break_distance_atr: float | None
+    """None when ATR is unavailable at this bar -- NOT 0.0. A reported
+    zero would be indistinguishable from a break that genuinely covered
+    no ATR, and would drag any average computed over it toward zero
+    while looking like data."""
     confirmation_method: ConfirmationMethod
 
     @property
@@ -483,7 +487,7 @@ def evaluate_mss(
         break_price=break_price,
         break_time=bar.open_time_utc,
         break_distance_points=break_distance,
-        break_distance_atr=break_distance / atr_price if atr_price > 0 else 0.0,
+        break_distance_atr=(break_distance / atr_price if atr_price > 0 else None),
         confirmation_method=config.method,
     )
     return MssVerdict(
