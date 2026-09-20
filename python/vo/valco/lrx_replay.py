@@ -40,7 +40,7 @@ not decide what qualifies.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, time
 
@@ -59,6 +59,43 @@ from vo.valco.lrx_levels import collect_levels
 from vo.valco.lrx_mss import MssConfig, MssEvent, detect_mss
 from vo.valco.lrx_sweep import SweepEvent, detect_sweeps
 from vo.valco.lrx_swings import CanonicalSwing, adapt_swings
+
+
+class _Prefix(Sequence[Bar]):
+    """A read-only view of `bars[: limit + 1]`, built in constant time.
+
+    The detectors are all documented to read no further than the index
+    they are given, and handing them a prefix enforces that structurally
+    rather than trusting it. Doing so with a SLICE, however, copies the
+    list on every bar -- quadratic in the length of the history, and the
+    single largest cost in a long replay after swing adaptation. This
+    view keeps the guarantee and drops the copy.
+    """
+
+    __slots__ = ("_bars", "_limit")
+
+    def __init__(self, bars: Sequence[Bar], limit: int) -> None:
+        self._bars = bars
+        self._limit = limit
+
+    def __len__(self) -> int:
+        return self._limit + 1
+
+    def __getitem__(self, item: int | slice) -> Bar | Sequence[Bar]:  # type: ignore[override]
+        if isinstance(item, slice):
+            return list(self._bars[: self._limit + 1])[item]
+        if item < 0:
+            item += self._limit + 1
+        if not 0 <= item <= self._limit:
+            raise IndexError(
+                f"index {item} is past this replay's visible horizon "
+                f"({self._limit}); a detector tried to read the future"
+            )
+        return self._bars[item]
+
+    def __iter__(self) -> Iterator[Bar]:
+        for index in range(self._limit + 1):
+            yield self._bars[index]
 
 
 class ReplayDependencyError(RuntimeError):
@@ -139,6 +176,13 @@ class _Accumulator:
     displacements: list[DisplacementEvent] = field(default_factory=list)
     mss_events: list[MssEvent] = field(default_factory=list)
     levels_seen: int = 0
+    adapted: tuple[CanonicalSwing, ...] = ()
+    adapted_from: int = -1
+    """How many raw swing points the cached adaptation was built from.
+    Re-adapting on every bar rebuilt the entire canonical list and its
+    structure labels each time -- two thirds of a long replay's runtime,
+    spent recomputing something that only changes when the engine emits
+    a swing."""
 
 
 def replay_events(
@@ -193,7 +237,7 @@ def replay_events(
     acc = _Accumulator()
 
     for index, bar in enumerate(bars):
-        visible = bars[: index + 1]
+        visible = _Prefix(bars, index)
         acc.bar_time_of[bar.bar_id] = bar.open_time_utc
         window = sequence.window_at(index)
 
@@ -233,11 +277,14 @@ def replay_events(
         #    shift that follows. Both are given the PREFIX, so neither
         #    can see past this bar even though both would accept the
         #    whole series.
-        swings_so_far = adapt_swings(
-            acc.swing_points,
-            bar_time_of=acc.bar_time_of,
-            equal_tolerance=config.swing_equal_tolerance,
-        )
+        if acc.adapted_from != len(acc.swing_points):
+            acc.adapted = adapt_swings(
+                acc.swing_points,
+                bar_time_of=acc.bar_time_of,
+                equal_tolerance=config.swing_equal_tolerance,
+            )
+            acc.adapted_from = len(acc.swing_points)
+        swings_so_far = acc.adapted
         horizon = config.displacement_search_bars or config.return_max_bars
         still_pending: list[SweepEvent] = []
         for sweep in acc.pending:
@@ -282,10 +329,14 @@ def replay_events(
         acc.awaiting_shift = still_awaiting
 
     return ReplayEvents(
-        swings=adapt_swings(
-            acc.swing_points,
-            bar_time_of=acc.bar_time_of,
-            equal_tolerance=config.swing_equal_tolerance,
+        swings=(
+            acc.adapted
+            if acc.adapted_from == len(acc.swing_points)
+            else adapt_swings(
+                acc.swing_points,
+                bar_time_of=acc.bar_time_of,
+                equal_tolerance=config.swing_equal_tolerance,
+            )
         ),
         sweeps=tuple(acc.sweeps),
         displacements=tuple(acc.displacements),
