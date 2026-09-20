@@ -147,7 +147,7 @@ class MssEvent:
         return self.break_at_utc
 
 
-def _broke(
+def broke_level(
     method: ConfirmationMethod,
     bar: Bar,
     swing_price: float,
@@ -156,6 +156,11 @@ def _broke(
     min_points: float,
     min_atr_points: float,
 ) -> bool:
+    """Did `bar` break `swing_price` in `direction`, under `method`?
+
+    Public because the BOS detector shares it. The two detectors mean
+    opposite things but must agree on what "broke" is -- one definition,
+    one place, so they cannot drift apart."""
     bearish = direction is MssDirection.BEARISH
 
     if method is ConfirmationMethod.WICK:
@@ -273,7 +278,7 @@ def detect_mss(
         min_atr_points = atr * tick_size * config.min_break_atr
 
     bar = bars[index]
-    if not _broke(
+    if not broke_level(
         config.method,
         bar,
         chosen.price,

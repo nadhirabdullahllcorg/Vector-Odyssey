@@ -104,8 +104,15 @@ repeat:
   blacklist_level_after_stop: true
   allow_replacement_setup: true
 
-# ── limits (confirmed 2026-09-19) ─────────────────────────────────────────
+# ── limits (confirmed 2026-09-19, re-confirmed 2026-09-20) ───────────────
 # max_trades_per_day and one-position-at-a-time are the user's own numbers.
+#
+# DELIBERATE OVERRIDE, DO NOT "FIX" THIS TO MATCH THE SPEC. The 51-section
+# Liquidity Reversal Model spec says 6 trades per day in its section 33.
+# Five is the operator's own instruction, given before that spec arrived
+# and re-confirmed after it. Five wins. Recorded here because a future
+# reader comparing config against spec would otherwise see a discrepancy
+# and correct the wrong side of it.
 # max_concurrent_positions is stated here for the strategy's own arming
 # logic; the ENFORCED cap lives in risk.yaml's max_open_positions, which
 # already reads 1. Risk bounds the trade; this file only avoids arming a
