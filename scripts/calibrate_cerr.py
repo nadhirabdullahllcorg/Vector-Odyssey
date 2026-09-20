@@ -167,7 +167,7 @@ def _load_bars(symbol: str, count: int) -> tuple[list[Bar], float, dict[str, obj
         symbol_info = client.symbol(symbol)
         rates = client.copy_rates(symbol, count)
     finally:
-        client.disconnect()
+        client.shutdown()
 
     profile = profiles[account.server]
     instrument = InstrumentId(
