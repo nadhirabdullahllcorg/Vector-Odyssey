@@ -14,8 +14,11 @@ from vo.market.bar import Bar
 from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.valco.lrx_displacement import (
+    DisplacementConfig,
     ExpansionDirection,
+    OriginModel,
     Qualification,
+    QualificationMode,
     measure_displacement,
     three_bar_gap,
 )
@@ -56,6 +59,7 @@ def _baseline(count: int, centre: float = 20_000.0, half_range: float = 5.0) -> 
 def _sweep(returned_index: int, side: LevelSide = LevelSide.BUY_SIDE) -> SweepEvent:
     kind = LevelKind.PREV_DAY_HIGH if side is LevelSide.BUY_SIDE else LevelKind.PREV_DAY_LOW
     return SweepEvent(
+        sweep_id=f"SWEEP:test:{returned_index}",
         level=ReferenceLevel(
             kind=kind, price=_LEVEL, established_at=None, trading_day=_START.date()
         ),
@@ -72,16 +76,12 @@ def _sweep(returned_index: int, side: LevelSide = LevelSide.BUY_SIDE) -> SweepEv
 
 
 def _measure(bars: list[Bar], index: int, sweep: SweepEvent, **overrides: object):
-    params: dict[str, object] = dict(
-        min_atr_multiple=1.5,
-        min_body_ratio=0.5,
-        min_net_move_atr=1.0,
-        max_bars=5,
-        atr_period=14,
-        tick_size=_TICK,
-    )
-    params.update(overrides)
-    return measure_displacement(bars, index, sweep, **params)  # type: ignore[arg-type]
+    import dataclasses
+
+    config = DisplacementConfig()
+    if overrides:
+        config = dataclasses.replace(config, **overrides)  # type: ignore[arg-type]
+    return measure_displacement(bars, index, sweep, config, tick_size=_TICK)
 
 
 # ── expansion in both directions ──────────────────────────────────────────
@@ -138,7 +138,7 @@ def test_a_big_range_that_closes_mid_range_fails_on_body_ratio() -> None:
     bars.append(_bar(20, open_=20_045.0, high=20_050.0, low=19_990.0, close=20_044.0))
     bars.append(_bar(21, open_=20_044.0, high=20_048.0, low=19_995.0, close=20_020.0))
 
-    event = _measure(bars, 21, _sweep(20), min_atr_multiple=0.5, min_net_move_atr=0.1)
+    event = _measure(bars, 21, _sweep(20), min_atr_range=0.5, min_net_move_atr=0.1)
 
     assert event is not None
     assert event.qualification is Qualification.FAIL
@@ -341,3 +341,137 @@ def test_the_origin_and_equilibrium_bracket_the_leg() -> None:
 
     assert event is not None
     assert event.low < event.expansion_equilibrium < event.expansion_origin
+
+
+# ── spec section 3: causal attribution ────────────────────────────────────
+
+
+def test_every_displacement_carries_the_id_of_the_raid_that_caused_it() -> None:
+    """Without this, the research log records what happened but not what
+    caused what -- and the FVG/MSS attribution rules cannot be enforced."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+    sweep = _sweep(20)
+
+    event = _measure(bars, 21, sweep)
+
+    assert event is not None
+    assert event.sweep_id == sweep.sweep_id
+    assert event.displacement_id.startswith("DISP:")
+    assert sweep.sweep_id in event.displacement_id
+
+
+# ── spec section 4: event time vs confirmation time ───────────────────────
+
+
+def test_the_event_time_and_confirmation_time_are_distinct() -> None:
+    """A leg that started at 10:31 is not knowable at 10:31."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.event_at_utc < event.confirmation_at_utc
+
+
+# ── spec section 12: CE is the midpoint of the expansion RANGE ────────────
+
+
+def test_equilibrium_is_the_midpoint_of_the_expansion_range() -> None:
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.expansion_equilibrium == (event.high + event.low) / 2.0
+
+
+# ── spec section 10: qualification modes are configurable ─────────────────
+
+
+def test_one_leg_can_pass_under_one_definition_and_fail_under_another() -> None:
+    """Which definition of 'displaced' is in force must be a config
+    choice, not a constant baked into the detector."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_049.0, high=20_050.0, low=20_020.0, close=20_022.0))
+    bars.append(_bar(21, open_=20_022.0, high=20_023.0, low=19_988.0, close=19_990.0))
+
+    by_range = _measure(bars, 21, _sweep(20), mode=QualificationMode.ATR_RANGE)
+    by_velocity = _measure(
+        bars,
+        21,
+        _sweep(20),
+        mode=QualificationMode.VELOCITY,
+        min_velocity_atr_per_minute=99.0,
+    )
+
+    assert by_range is not None and by_velocity is not None
+    assert by_range.qualification is Qualification.PASS
+    assert by_velocity.qualification is Qualification.FAIL
+    assert by_range.mode is QualificationMode.ATR_RANGE
+
+
+def test_the_active_mode_is_recorded_on_the_event() -> None:
+    """A run's events must say which definition produced them."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20), mode=QualificationMode.ATR_BODY)
+
+    assert event is not None
+    assert event.mode is QualificationMode.ATR_BODY
+
+
+# ── spec section 11: origin is a model, not an assumption ─────────────────
+
+
+def test_every_origin_model_is_computed_and_the_configured_one_selected() -> None:
+    """The spec warns against assuming one candle is always the correct
+    origin, so all candidates are kept for later comparison."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    by_sweep = _measure(bars, 21, _sweep(20), origin_model=OriginModel.SWEEP_EXTREME)
+    by_leg = _measure(bars, 21, _sweep(20), origin_model=OriginModel.LEG_START_OPEN)
+
+    assert by_sweep is not None and by_leg is not None
+    assert len(by_sweep.origin_candidates) == 3
+    assert by_sweep.expansion_origin != by_leg.expansion_origin
+    assert by_sweep.origin_candidates == by_leg.origin_candidates
+
+
+# ── spec section 10: the remaining required measurements ──────────────────
+
+
+def test_the_full_measurement_set_is_recorded() -> None:
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.wick_points >= 0.0
+    assert event.body_atr > 0.0
+    assert event.distance_from_sweep > 0.0
+    assert event.directional_bars >= event.consecutive_directional_bars - 1
+
+
+def test_distance_from_sweep_measures_reach_beyond_the_level_not_leg_range() -> None:
+    """The reversal's reach away from the swept level is a different
+    fact from how tall the leg was."""
+    bars = _baseline(20)
+    bars.append(_bar(20, open_=20_048.0, high=20_050.0, low=20_030.0, close=20_032.0))
+    bars.append(_bar(21, open_=20_032.0, high=20_033.0, low=19_990.0, close=19_992.0))
+
+    event = _measure(bars, 21, _sweep(20))
+
+    assert event is not None
+    assert event.distance_from_sweep == abs(event.low - _LEVEL)

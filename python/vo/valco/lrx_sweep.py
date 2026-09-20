@@ -60,6 +60,11 @@ class SweepEvent:
     re-deriving them from bars.
     """
 
+    sweep_id: str
+    """Stable identity for this raid. Every downstream event carries it,
+    so a displacement, an MSS, an FVG and a trade can all be attributed
+    back to the raid that started them (spec sections 3 and 39). Without
+    it the research log records what happened but not what caused what."""
     level: ReferenceLevel
     side: LevelSide
     penetration_index: int
@@ -200,6 +205,10 @@ def detect_sweep(
         return None
 
     return SweepEvent(
+        sweep_id=(
+            f"SWEEP:{level.kind}:{level.price:.2f}:"
+            f"{current.open_time_utc.isoformat()}"
+        ),
         level=level,
         side=side,
         penetration_index=best_index,

@@ -70,6 +70,68 @@ class Qualification(Enum):
         return self.value
 
 
+class QualificationMode(Enum):
+    """Which definition of "displaced" a run is testing.
+
+    The spec is explicit that no ATR figure is a canonical ICT rule --
+    these are VO operational definitions, and which one is in force must
+    be a config choice rather than a constant baked into the detector.
+    One mode per backtest; mixing them makes a result unattributable.
+    """
+
+    ATR_RANGE = "ATR_RANGE"
+    ATR_BODY = "ATR_BODY"
+    BODY_RATIO = "BODY_RATIO"
+    CONSECUTIVE_BARS = "CONSECUTIVE_BARS"
+    VELOCITY = "VELOCITY"
+    COMBINED = "COMBINED"
+    """Every clause must pass -- the strictest reading, and the baseline."""
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class OriginModel(Enum):
+    """Where the expansion is measured FROM (spec section 11).
+
+    Deliberately several: the spec warns against assuming one candle is
+    always the correct origin, so each is computed as a candidate and the
+    configured one drives the event's `expansion_origin`.
+    """
+
+    SWEEP_EXTREME = "SWEEP_EXTREME"
+    """The raid's own furthest penetration -- the price the reversal is
+    measured away from."""
+    LEG_START_OPEN = "LEG_START_OPEN"
+    """The open of the first bar of the expansion leg."""
+    LAST_OPPOSING_EXTREME = "LAST_OPPOSING_EXTREME"
+    """The furthest adverse price inside the leg before it committed --
+    the region ICT discretion usually points at."""
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@dataclass(frozen=True, slots=True)
+class DisplacementConfig:
+    """The qualification definition in force for one run.
+
+    Every threshold is here rather than passed loose, so a research run
+    records exactly which definition produced its events.
+    """
+
+    mode: QualificationMode = QualificationMode.COMBINED
+    origin_model: OriginModel = OriginModel.SWEEP_EXTREME
+    min_atr_range: float = 1.5
+    min_atr_body: float = 1.0
+    min_body_ratio: float = 0.5
+    min_net_move_atr: float = 1.0
+    min_consecutive_bars: int = 2
+    min_velocity_atr_per_minute: float = 0.1
+    max_bars: int = 5
+    atr_period: int = 14
+
+
 @dataclass(frozen=True, slots=True)
 class GapGeometry:
     """A three-bar inefficiency's bounds. Presence and shape only -- the
@@ -122,10 +184,22 @@ class DisplacementEvent:
     why a FAIL carrying its numbers is worth more than a False.
     """
 
+    displacement_id: str
+    sweep_id: str
+    """Links this expansion to the raid that preceded it (spec section 3).
+    An MSS and an FVG will carry it too, so the whole chain is
+    attributable rather than merely co-occurring."""
     sweep_level_kind: str
     direction: ExpansionDirection
     start_index: int
     end_index: int
+    event_at_utc: datetime
+    """When the expansion began."""
+    confirmation_at_utc: datetime
+    """When it became MEASURABLE -- the close of the evaluated bar.
+    Nothing may consume this event before it (spec section 4). Distinct
+    from event_at_utc on purpose: a leg that started at 10:31 is not
+    knowable at 10:31."""
     start_at_utc: datetime
     end_at_utc: datetime
     start_price: float
@@ -135,9 +209,17 @@ class DisplacementEvent:
     range_points: float
     range_atr: float
     body_points: float
+    body_atr: float
     body_ratio: float
+    wick_points: float
     net_move_points: float
     net_move_atr: float
+    distance_from_sweep: float
+    """How far the leg's far extreme travelled from the swept level
+    itself -- the reversal's reach, distinct from the leg's own range."""
+    directional_bars: int
+    """Total bars closing in the direction of travel, not just the
+    longest run."""
     bar_count: int
     elapsed_seconds: float
     velocity_atr_per_minute: float
@@ -146,7 +228,14 @@ class DisplacementEvent:
     consecutive_directional_bars: int
     gap: GapGeometry | None
     expansion_origin: float
+    """Per the configured OriginModel."""
+    origin_candidates: dict[str, float]
+    """Every origin model's answer, so a later study can compare them
+    without re-running the detector (spec section 11)."""
     expansion_equilibrium: float
+    """CE: the midpoint of the measured expansion RANGE,
+    (high + low) / 2, per spec section 12."""
+    mode: QualificationMode
     qualification: Qualification
     qualification_reason: str
 
@@ -186,42 +275,105 @@ def _consecutive_directional(bars: Sequence[Bar], direction: ExpansionDirection)
     return best
 
 
+def _qualify(
+    config: DisplacementConfig,
+    *,
+    range_atr: float,
+    body_atr: float,
+    body_ratio: float,
+    net_move_atr: float,
+    consecutive: int,
+    velocity: float,
+) -> tuple[Qualification, str]:
+    """Apply the configured definition. Each clause states its own
+    shortfall so a FAIL is diagnostic rather than a verdict."""
+    clauses: list[tuple[bool, str]] = []
+
+    def range_clause() -> tuple[bool, str]:
+        return (
+            range_atr >= config.min_atr_range,
+            f"range {range_atr:.2f} ATR below {config.min_atr_range:.2f}",
+        )
+
+    def body_clause() -> tuple[bool, str]:
+        return (
+            body_atr >= config.min_atr_body,
+            f"body {body_atr:.2f} ATR below {config.min_atr_body:.2f}",
+        )
+
+    def ratio_clause() -> tuple[bool, str]:
+        return (
+            body_ratio >= config.min_body_ratio,
+            f"body ratio {body_ratio:.2f} below {config.min_body_ratio:.2f}",
+        )
+
+    def bars_clause() -> tuple[bool, str]:
+        return (
+            consecutive >= config.min_consecutive_bars,
+            f"{consecutive} consecutive bars below {config.min_consecutive_bars}",
+        )
+
+    def velocity_clause() -> tuple[bool, str]:
+        return (
+            velocity >= config.min_velocity_atr_per_minute,
+            f"velocity {velocity:.3f} ATR/min below "
+            f"{config.min_velocity_atr_per_minute:.3f}",
+        )
+
+    def net_clause() -> tuple[bool, str]:
+        return (
+            net_move_atr >= config.min_net_move_atr,
+            f"net move {net_move_atr:.2f} ATR below {config.min_net_move_atr:.2f}",
+        )
+
+    if config.mode is QualificationMode.ATR_RANGE:
+        clauses = [range_clause()]
+    elif config.mode is QualificationMode.ATR_BODY:
+        clauses = [body_clause()]
+    elif config.mode is QualificationMode.BODY_RATIO:
+        clauses = [ratio_clause()]
+    elif config.mode is QualificationMode.CONSECUTIVE_BARS:
+        clauses = [bars_clause()]
+    elif config.mode is QualificationMode.VELOCITY:
+        clauses = [velocity_clause()]
+    else:  # COMBINED
+        clauses = [range_clause(), ratio_clause(), net_clause()]
+
+    failures = [reason for ok, reason in clauses if not ok]
+    if failures:
+        return Qualification.FAIL, "; ".join(failures)
+    return Qualification.PASS, f"{config.mode} satisfied"
+
+
 def measure_displacement(
     bars: Sequence[Bar],
     index: int,
     sweep: SweepEvent,
+    config: DisplacementConfig,
     *,
-    min_atr_multiple: float,
-    min_body_ratio: float,
-    min_net_move_atr: float,
-    max_bars: int,
-    atr_period: int,
     tick_size: float,
 ) -> DisplacementEvent | None:
     """
-    Measure the expansion leg running from the raid's return bar to
-    `index`, and say whether it qualifies.
+    Measure the expansion leg from the raid's return bar to `index`, and
+    say whether it meets the configured definition.
 
-    Returns None only when the leg cannot be measured at all -- `index`
-    is at or before the raid, the leg is longer than `max_bars`, or ATR
-    is unavailable. A measurable-but-weak leg comes back as a FAIL with
-    its numbers, never as None: that distinction is the whole point.
+    Returns None only when the leg cannot be MEASURED -- `index` at or
+    before the raid, leg longer than the budget, ATR unavailable or zero.
+    A measurable-but-weak leg comes back as a FAIL carrying its numbers.
     """
     start = sweep.returned_index
     if index <= start or index >= len(bars):
         return None
-    if index - start > max_bars:
+    if index - start > config.max_bars:
         return None
 
-    atr = atr_ticks(bars, index, period=atr_period, tick_size=tick_size)
+    atr = atr_ticks(bars, index, period=config.atr_period, tick_size=tick_size)
     if atr is None:
         return None
     atr_price = atr * tick_size
     if atr_price <= 0:
         return None
 
-    # A buy-side raid (price spiked above a high and failed) sets up a
-    # move DOWN -- the counter-expansion this model trades.
     direction = (
         ExpansionDirection.DOWN
         if sweep.side is LevelSide.BUY_SIDE
@@ -245,6 +397,7 @@ def measure_displacement(
 
     body_points = sum(abs(bar.close - bar.open) for bar in leg)
     total_range = sum(bar.high - bar.low for bar in leg)
+    wick_points = max(0.0, total_range - body_points)
     body_ratio = body_points / total_range if total_range > 0 else 0.0
 
     elapsed_seconds = (last.open_time_utc - first.open_time_utc).total_seconds()
@@ -252,11 +405,9 @@ def measure_displacement(
     net_move_atr = net_move_points / atr_price
     velocity = net_move_atr / elapsed_minutes if elapsed_minutes > 0 else 0.0
 
-    mfe = (
-        high - start_price
-        if direction is ExpansionDirection.UP
-        else start_price - low
-    )
+    far = low if direction is ExpansionDirection.DOWN else high
+    mfe = abs(far - start_price)
+    distance_from_sweep = abs(far - sweep.level.price)
 
     gap: GapGeometry | None = None
     for probe in range(start + 2, index + 1):
@@ -265,31 +416,50 @@ def measure_displacement(
             gap = found
             break
 
+    # Every origin model computed, the configured one selected -- the
+    # spec warns against assuming one candle is always right.
+    adverse = (
+        max(bar.high for bar in leg)
+        if direction is ExpansionDirection.DOWN
+        else min(bar.low for bar in leg)
+    )
+    candidates = {
+        str(OriginModel.SWEEP_EXTREME): sweep.penetration_price,
+        str(OriginModel.LEG_START_OPEN): start_price,
+        str(OriginModel.LAST_OPPOSING_EXTREME): adverse,
+    }
+    origin = candidates[str(config.origin_model)]
+
+    consecutive = _consecutive_directional(leg, direction)
+    directional_bars = sum(
+        1
+        for bar in leg
+        if (bar.close > bar.open)
+        is (direction is ExpansionDirection.UP)
+        and bar.close != bar.open
+    )
     range_atr = range_points / atr_price
+    body_atr = body_points / atr_price
 
-    reasons: list[str] = []
-    if range_atr < min_atr_multiple:
-        reasons.append(f"range {range_atr:.2f} ATR below {min_atr_multiple:.2f}")
-    if body_ratio < min_body_ratio:
-        reasons.append(f"body ratio {body_ratio:.2f} below {min_body_ratio:.2f}")
-    if net_move_atr < min_net_move_atr:
-        reasons.append(f"net move {net_move_atr:.2f} ATR below {min_net_move_atr:.2f}")
-
-    qualification = Qualification.FAIL if reasons else Qualification.PASS
-    reason = "; ".join(reasons) if reasons else "range, body and net move all met"
-
-    # Origin is where the leg began -- the raid's own extreme, which is
-    # the price the reversal is measured away from. Equilibrium is its
-    # midpoint against the leg's far extreme.
-    origin = sweep.penetration_price
-    far = low if direction is ExpansionDirection.DOWN else high
-    equilibrium = (origin + far) / 2.0
+    qualification, reason = _qualify(
+        config,
+        range_atr=range_atr,
+        body_atr=body_atr,
+        body_ratio=body_ratio,
+        net_move_atr=net_move_atr,
+        consecutive=consecutive,
+        velocity=velocity,
+    )
 
     return DisplacementEvent(
+        displacement_id=f"DISP:{sweep.sweep_id}:{last.open_time_utc.isoformat()}",
+        sweep_id=sweep.sweep_id,
         sweep_level_kind=str(sweep.level.kind),
         direction=direction,
         start_index=start,
         end_index=index,
+        event_at_utc=first.open_time_utc,
+        confirmation_at_utc=last.open_time_utc,
         start_at_utc=first.open_time_utc,
         end_at_utc=last.open_time_utc,
         start_price=start_price,
@@ -299,18 +469,26 @@ def measure_displacement(
         range_points=range_points,
         range_atr=range_atr,
         body_points=body_points,
+        body_atr=body_atr,
         body_ratio=body_ratio,
+        wick_points=wick_points,
         net_move_points=net_move_points,
         net_move_atr=net_move_atr,
+        distance_from_sweep=distance_from_sweep,
+        directional_bars=directional_bars,
         bar_count=len(leg),
         elapsed_seconds=elapsed_seconds,
         velocity_atr_per_minute=velocity,
         max_favorable_excursion=mfe,
         close_location=_close_location(direction, end_price, high, low),
-        consecutive_directional_bars=_consecutive_directional(leg, direction),
+        consecutive_directional_bars=consecutive,
         gap=gap,
         expansion_origin=origin,
-        expansion_equilibrium=equilibrium,
+        origin_candidates=candidates,
+        # Spec section 12: CE is the midpoint of the measured expansion
+        # RANGE, not of origin-to-extreme.
+        expansion_equilibrium=(high + low) / 2.0,
+        mode=config.mode,
         qualification=qualification,
         qualification_reason=reason,
     )
