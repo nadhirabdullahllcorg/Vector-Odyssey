@@ -47,6 +47,7 @@ import json
 import subprocess
 import sys
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -199,10 +200,15 @@ def _load_bars(symbol: str, count: int) -> tuple[list[Bar], float, dict[str, obj
     meta: dict[str, object] = {
         "broker_server": account.server,
         "symbol": symbol,
+        "rates_requested": count,
         "rates_returned": len(rates),
         "bars_accepted": len(sequenced.sequence),
         "bars_quarantined": len(sequenced.quarantined),
         "tick_size": symbol_info.tick_size,
+        "point": symbol_info.point,
+        "tick_value": symbol_info.tick_value,
+        "contract_size": symbol_info.contract_size,
+        "digits": symbol_info.digits,
         "broker_standard_offset_hours": profile.standard_utc_offset_hours,
         "broker_dst_offset_hours": profile.dst_utc_offset_hours,
         "broker_dst_calendar": str(profile.dst_calendar),
@@ -211,6 +217,119 @@ def _load_bars(symbol: str, count: int) -> tuple[list[Bar], float, dict[str, obj
         "last_bar_utc": bars[-1].open_time_utc.isoformat() if bars else None,
     }
     return list(sequenced.sequence.bars), symbol_info.tick_size, meta
+
+
+def _data_quality(
+    bars,
+    rows,
+    cycles,
+    events,
+    *,
+    bar_meta: dict[str, object],
+    time_engine: VOTimeEngine,
+    horizon: int,
+) -> str:
+    """A reproducibility record, written BEFORE any interpretation.
+
+    The distinction this section exists to make: DATA availability is not
+    EVENT availability. A low MSS count can mean the market produced few
+    qualifying structures -- or that history was short, ATR never warmed
+    up, or the search horizon discarded most candidates. Those are
+    different findings and the numbers below separate them.
+    """
+    instrument = bars[0].instrument_id
+    trading_days = sorted(
+        {
+            time_engine.context_for(bar.open_time_utc, instrument).trading_day
+            for bar in bars
+        }
+    )
+    rth_sessions = sorted(
+        {
+            time_engine.context_for(bar.open_time_utc, instrument).trading_day
+            for bar in bars
+            if str(
+                time_engine.context_for(bar.open_time_utc, instrument).session
+            ).startswith("NY")
+        }
+    )
+
+    # Gap size is measured in the series' OWN timeframe, not in minutes.
+    # Hardcoding one minute reported every interval of an M15 series as a
+    # gap -- the metric has to know what a normal step is before it can
+    # say what an abnormal one is.
+    step_seconds = bars[0].timeframe.seconds
+    gaps = 0
+    missing_bars = 0
+    if step_seconds:
+        for earlier, later in pairwise(bars):
+            elapsed = (later.open_time_utc - earlier.open_time_utc).total_seconds()
+            if elapsed > step_seconds:
+                gaps += 1
+                missing_bars += int(elapsed // step_seconds) - 1
+
+    zero_range = sum(1 for bar in bars if bar.high <= bar.low)
+    atr_unavailable = sum(1 for row in rows if row.range_atr is None)
+    body_er_undefined = sum(1 for row in rows if row.body_efficiency_ratio is None)
+
+    lines = [
+        "## Data quality",
+        "",
+        "Recorded before interpretation. **Data availability is not event",
+        "availability**: a low MSS count can mean the market produced few",
+        "qualifying structures, or that history was short, ATR never warmed up,",
+        "or the search horizon discarded candidates. These numbers separate",
+        "those explanations.",
+        "",
+        "```",
+        f"Requested M1 bars      : {bar_meta['rates_requested']}",
+        f"Retrieved M1 bars      : {bar_meta['rates_returned']}",
+        f"Accepted into sequence : {bar_meta['bars_accepted']}",
+        f"Quarantined (dupe/order): {bar_meta['bars_quarantined']}",
+        f"Actual UTC start       : {bar_meta['first_bar_utc']}",
+        f"Actual UTC end         : {bar_meta['last_bar_utc']}",
+        f"Trading days covered   : {len(trading_days)}",
+        f"Days with NY session   : {len(rth_sessions)}",
+        f"Timeframe              : {bars[0].timeframe}",
+        f"Gaps beyond one bar    : {gaps}",
+        f"Bars absent in gaps    : {missing_bars}",
+        "  (weekend and session closures appear here and are expected)",
+        f"Zero-range bars        : {zero_range}",
+        "",
+        f"Consolidation windows  : {len(rows)}",
+        f"  ATR unavailable      : {atr_unavailable}",
+        f"  body ER undefined    : {body_er_undefined}",
+        f"Levels observed        : {events.counts['levels_seen']}",
+        f"Swings confirmed       : {events.counts['swings']}",
+        f"Sweeps                 : {events.counts['sweeps']}",
+        f"Displacements          : {events.counts['displacements']}",
+        f"MSS                    : {events.counts['mss']}",
+        f"CERR cycles            : {len(cycles)}",
+        "",
+        f"Symbol                 : {bar_meta['symbol']}",
+        f"Tick size              : {bar_meta['tick_size']}",
+        f"Point                  : {bar_meta['point']}",
+        f"Tick value             : {bar_meta['tick_value']}",
+        f"Contract size          : {bar_meta['contract_size']}",
+        f"Digits                 : {bar_meta['digits']}",
+        "",
+        f"Broker server          : {bar_meta['broker_server']}",
+        f"Broker std offset (h)  : {bar_meta['broker_standard_offset_hours']}",
+        f"Broker DST offset (h)  : {bar_meta['broker_dst_offset_hours']}",
+        f"Broker DST calendar    : {bar_meta['broker_dst_calendar']}",
+        f"Broker confidence      : {bar_meta['broker_confidence']}",
+        "Session profile        : sessions.yaml (America/New_York, RTH 09:30-16:00,",
+        "                         settlement 16:14, trading day opens 18:00)",
+        f"Displacement horizon   : {horizon} bars (infrastructure, not strategy)",
+        "```",
+        "",
+    ]
+    if trading_days:
+        lines[-1:] = [
+            f"Trading days: `{trading_days[0]}` .. `{trading_days[-1]}`",
+            "",
+        ]
+    return "\n".join(lines)
 
 
 def _render_distributions(rows, cycles) -> str:
@@ -285,6 +404,8 @@ def main() -> None:
             replay_config, displacement_search_bars=args.displacement_search_bars
         )
 
+    horizon = args.displacement_search_bars or replay_config.return_max_bars
+
     print("Replaying detectors ...", flush=True)
     events = replay_events(
         bars,
@@ -331,9 +452,7 @@ def main() -> None:
             "thresholds": "UNCONFIGURED",
         },
         "replay_infrastructure": {
-            "displacement_search_bars": (
-                args.displacement_search_bars or replay_config.return_max_bars
-            ),
+            "displacement_search_bars": horizon,
             "source": (
                 "explicit"
                 if args.displacement_search_bars
@@ -357,9 +476,22 @@ def main() -> None:
     (out_dir / "run.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
     )
-    (out_dir / "distributions.md").write_text(
-        _render_distributions(rows, cycles), encoding="utf-8"
+    report = "\n".join(
+        [
+            _render_distributions(rows, cycles),
+            "",
+            _data_quality(
+                bars,
+                rows,
+                cycles,
+                events,
+                bar_meta=bar_meta,
+                time_engine=time_engine,
+                horizon=horizon,
+            ),
+        ]
     )
+    (out_dir / "distributions.md").write_text(report, encoding="utf-8")
 
     print(
         f"\nWrote {written_rows} consolidation rows and {written_cycles} cycle rows\n"
