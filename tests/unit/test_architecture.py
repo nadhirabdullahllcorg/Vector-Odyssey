@@ -497,6 +497,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.valco.lrx_consolidation",
         "vo.valco.lrx_cerr",
         "vo.valco.lrx_calibration",
+        "vo.valco.lrx_replay",
         "vo.valco.lrx_inefficiency",
         "vo.valco.lrx_mss",
         "vo.valco.lrx_sweep",
