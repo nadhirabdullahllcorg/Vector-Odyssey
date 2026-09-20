@@ -104,21 +104,28 @@ repeat:
   blacklist_level_after_stop: true
   allow_replacement_setup: true
 
-# ── limits (confirmed 2026-09-19, re-confirmed 2026-09-20) ───────────────
-# max_trades_per_day and one-position-at-a-time are the user's own numbers.
+# ── limits (baseline locked 2026-09-20) ──────────────────────────────────
+# These are the operator's own numbers and they are the CURRENT INTENT.
 #
-# DELIBERATE OVERRIDE, DO NOT "FIX" THIS TO MATCH THE SPEC. The 51-section
-# Liquidity Reversal Model spec says 6 trades per day in its section 33.
-# Five is the operator's own instruction, given before that spec arrived
-# and re-confirmed after it. Five wins. Recorded here because a future
-# reader comparing config against spec would otherwise see a discrepancy
-# and correct the wrong side of it.
+# DELIBERATE OVERRIDE, DO NOT "FIX" THESE TO MATCH ANY SPEC DOCUMENT.
+# Three different figures for daily frequency exist in the written specs:
+# the 51-section Liquidity Reversal Model says 6 (section 33), the
+# section-38 package's draft schema said 3, and an earlier instruction
+# in the same session said 5. All three are superseded. The baseline is
+# ONE trade per day, locked on 2026-09-20 so that the first FVG and
+# backtest results are generated under the intended risk protocol rather
+# than a stale one.
+#
+# The architecture is deliberately still capable of testing other
+# frequencies -- this is a config value, not a constant -- but 1 is what
+# the baseline arm runs. A future reader comparing this file against a
+# spec document should correct the document, not this file.
 # max_concurrent_positions is stated here for the strategy's own arming
 # logic; the ENFORCED cap lives in risk.yaml's max_open_positions, which
 # already reads 1. Risk bounds the trade; this file only avoids arming a
 # setup the risk manager would reject anyway.
 limits:
-  max_trades_per_day: 5
+  max_trades_per_day: 1
   max_concurrent_positions: 1
   max_consecutive_losses: 2
   # Spread filter, MEASURED from the real 1xTrade capture rather than

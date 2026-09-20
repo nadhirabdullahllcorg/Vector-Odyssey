@@ -43,7 +43,7 @@ def test_the_shipped_session_windows_match_what_the_user_specified() -> None:
 def test_the_shipped_limits_match_what_the_user_specified() -> None:
     limits = load_lrx_config(_SHIPPED).limits
 
-    assert limits.max_trades_per_day == 5
+    assert limits.max_trades_per_day == 1
     assert limits.max_concurrent_positions == 1
 
 
@@ -110,7 +110,7 @@ objective:
   target_mode: T1_ONLY
 stop: {buffer_atr: 0.25}
 setup_life: {max_age_minutes: 45, max_bars_after_mss: 30}
-limits: {max_trades_per_day: 5, max_concurrent_positions: 1, max_consecutive_losses: 2}
+limits: {max_trades_per_day: 1, max_concurrent_positions: 1, max_consecutive_losses: 2}
 """
 
 
@@ -157,3 +157,60 @@ def test_a_nonsense_numeric_bound_raises(tmp_path: Path) -> None:
 
     with pytest.raises(LrxConfigError, match="min_penetration_atr"):
         load_lrx_config(_write(tmp_path, text))
+
+
+# ── baseline frequency lock (2026-09-20) ──────────────────────────────────
+
+
+def test_the_shipped_baseline_allows_one_trade_per_day() -> None:
+    """Pinned because three different figures for this exist across the
+    written specs -- 6 in the Liquidity Reversal Model's section 33, 3 in
+    the section-38 draft schema, 5 in an earlier instruction. All are
+    superseded. One is current intent, and a backtest generated under any
+    other number is not the baseline.
+
+    This asserts the SHIPPED config, not a loader default, because the
+    number that matters is the one a run actually uses.
+    """
+    assert load_lrx_config(_SHIPPED).limits.max_trades_per_day == 1
+
+
+def test_the_baseline_holds_one_position_at_a_time() -> None:
+    """Strategy-layer arming only. The ENFORCED cap is risk.yaml's
+    max_open_positions; this value exists so LRX does not arm a setup the
+    risk manager would reject anyway. Two layers, stated twice on
+    purpose, and a test on each."""
+    config = load_lrx_config(_SHIPPED)
+
+    assert config.limits.max_concurrent_positions == 1
+    assert config.limits.max_consecutive_losses == 2
+
+
+def test_the_per_level_repeat_limit_is_declared_but_not_yet_parsed() -> None:
+    """max_trades_per_level_per_day: 1 sits in lrx.yaml and NOTHING reads
+    it -- LrxConfig has no `repeat` section and no code references the
+    key. It is not enforced anywhere today.
+
+    Pinned as a known gap rather than left to be assumed active. The
+    repeat/blacklist rules belong to the Setup State Machine, which is
+    not built; when it is, this test should be replaced by one asserting
+    the limit actually binds. Until then a reader skimming the YAML would
+    reasonably believe a level cannot be traded twice in a day, and it
+    can.
+    """
+    import yaml
+
+    raw = yaml.safe_load(_SHIPPED.read_text(encoding="utf-8"))
+    assert raw["repeat"]["max_trades_per_level_per_day"] == 1
+
+    config = load_lrx_config(_SHIPPED)
+    assert not hasattr(config, "repeat")
+
+
+def test_risk_enforces_the_single_open_position_independently() -> None:
+    """The strategy declining to arm and the risk layer refusing to size
+    are different guarantees. If the strategy config were edited, this
+    must still hold."""
+    from vo.risk.risk_config import load_risk_config
+
+    assert load_risk_config(Path("config/settings/risk.yaml")).max_open_positions == 1

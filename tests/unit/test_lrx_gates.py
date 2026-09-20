@@ -79,9 +79,13 @@ def test_one_position_at_a_time() -> None:
     assert ArmingBlock.POSITION_ALREADY_OPEN in decision.blocks
 
 
-def test_the_daily_trade_cap_is_five() -> None:
-    assert _arming(trades_today=4).allowed is True
-    assert ArmingBlock.DAILY_TRADE_CAP_REACHED in _arming(trades_today=5).blocks
+def test_the_daily_trade_cap_is_one() -> None:
+    """Baseline locked 2026-09-20. The gate reads the shipped config, so
+    this test moves with lrx.yaml by design -- it asserts the cap BINDS
+    at the configured number, and that the first trade of the day is
+    still allowed through it."""
+    assert _arming(trades_today=0).allowed is True
+    assert ArmingBlock.DAILY_TRADE_CAP_REACHED in _arming(trades_today=1).blocks
 
 
 def test_consecutive_losses_stop_the_day() -> None:
