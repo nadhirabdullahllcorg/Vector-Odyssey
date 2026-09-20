@@ -140,18 +140,32 @@ class ReplayEvents:
     swings: tuple[CanonicalSwing, ...] = ()
     sweeps: tuple[SweepEvent, ...] = ()
     displacements: tuple[DisplacementEvent, ...] = ()
+    """EVERY measured leg, qualified or not. measure_displacement
+    deliberately returns a FAIL carrying its numbers rather than a bare
+    None, and those near-misses are the population a threshold study
+    needs. Counting them as displacements in the funnel, however, makes
+    the stage look as though it filters nothing -- which is how a 1:1
+    sweep-to-displacement ratio appeared on real data."""
     mss_events: tuple[MssEvent, ...] = ()
     levels_seen: int = 0
     bars_replayed: int = 0
 
     @property
+    def qualified_displacements(self) -> tuple[DisplacementEvent, ...]:
+        return tuple(d for d in self.displacements if d.qualified)
+
+    @property
     def counts(self) -> dict[str, int]:
+        """The funnel. `displacements_measured` counts every leg that
+        could be measured at all; `displacements` counts those that
+        QUALIFIED, which is the one that narrows."""
         return {
             "bars": self.bars_replayed,
             "swings": len(self.swings),
             "levels_seen": self.levels_seen,
             "sweeps": len(self.sweeps),
-            "displacements": len(self.displacements),
+            "displacements_measured": len(self.displacements),
+            "displacements": len(self.qualified_displacements),
             "mss": len(self.mss_events),
         }
 
@@ -301,6 +315,11 @@ def replay_events(
                 still_pending.append(sweep)
                 continue
             acc.displacements.append(displacement)
+            if not displacement.qualified:
+                # Measured and kept for the threshold study, but an
+                # unqualified leg is not the expansion the model
+                # describes, so it does not go looking for a shift.
+                continue
             acc.awaiting_shift.append((sweep, displacement))
         acc.pending = still_pending
 

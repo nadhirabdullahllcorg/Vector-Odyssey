@@ -169,11 +169,13 @@ def test_the_event_stream_is_counted_and_reportable() -> None:
         "swings",
         "levels_seen",
         "sweeps",
+        "displacements_measured",
         "displacements",
         "mss",
     }
     assert counts["bars"] == 288
     # The funnel can only narrow.
+    assert counts["displacements_measured"] >= counts["displacements"]
     assert counts["sweeps"] >= counts["displacements"] >= counts["mss"]
 
 
@@ -188,6 +190,25 @@ def test_an_empty_series_produces_an_empty_stream() -> None:
 
 
 # ── provenance ────────────────────────────────────────────────────────────
+
+
+def test_an_unqualified_leg_is_recorded_but_never_seeks_a_shift() -> None:
+    """measure_displacement returns a FAIL carrying its numbers rather
+    than a bare None, which is right -- near misses are the population a
+    threshold study needs. But counting them as displacements makes the
+    stage look as though it filters nothing, and a 1:1 sweep-to-
+    displacement ratio on real data is what that looks like.
+
+    So they are kept in `displacements` and excluded from the funnel and
+    from the MSS search."""
+    events = _replay(_market())
+    by_id = {d.displacement_id: d for d in events.displacements}
+
+    assert len(events.displacements) >= len(events.qualified_displacements)
+    for mss in events.mss_events:
+        assert by_id[mss.displacement_id].qualified, (
+            "an unqualified leg produced an MSS"
+        )
 
 
 def test_every_displacement_names_the_raid_it_followed() -> None:
