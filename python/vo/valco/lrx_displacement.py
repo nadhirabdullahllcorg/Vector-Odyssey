@@ -203,10 +203,16 @@ class DisplacementEvent:
     event_at_utc: datetime
     """When the expansion began."""
     confirmation_at_utc: datetime
-    """When it became MEASURABLE -- the close of the evaluated bar.
-    Nothing may consume this event before it (spec section 4). Distinct
-    from event_at_utc on purpose: a leg that started at 10:31 is not
-    knowable at 10:31."""
+    """The LABEL of the bar whose close made this leg measurable -- i.e.
+    that bar's open time, per the convention documented on
+    Bar.close_time_utc. It is NOT the close instant itself; an earlier
+    version of this docstring said it was, while the value was always
+    the label, and the two are one bar apart.
+
+    Nothing may consume this event before that bar completes (spec
+    section 4). Distinct from event_at_utc on purpose: a leg that
+    started at 10:31 is not knowable at 10:31. For the real wall-clock
+    instant, take Bar.close_time_utc of the bar with this label."""
     start_at_utc: datetime
     end_at_utc: datetime
     start_price: float

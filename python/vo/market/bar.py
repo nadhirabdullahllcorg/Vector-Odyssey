@@ -45,7 +45,7 @@ but the guarantee is free either way).
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum, auto
 
 from .identity import InstrumentId
@@ -130,6 +130,36 @@ class Bar:
     quality: DataQuality = DataQuality.VALID
     quality_reason: str | None = None
     provenance: Provenance | None = None
+
+    @property
+    def close_time_utc(self) -> datetime | None:
+        """The instant this bar's OHLC became final.
+
+        THE CONVENTION, STATED ONCE. Everywhere in VO a bar is LABELLED
+        by `open_time_utc`, and every event timestamp derived from a bar
+        is that label -- a displacement's start, an MSS or BOS break, an
+        FVG's creation, a swing's confirmation. Each of those means "the
+        bar with this label, whose CLOSE made the fact knowable". They
+        are not claims that the fact existed at the bar's open.
+
+        That convention is self-consistent, which is why it is safe to
+        compare event times directly: both sides mean "knowable at the
+        close of the bar with this label", so `a <= b` orders
+        availability correctly. A swing confirmed by the same bar that
+        produced a break is available to that break, because both became
+        knowable at the same instant.
+
+        This property is the ESCAPE HATCH for the case the convention
+        cannot serve: code that needs a real wall-clock instant -- live
+        execution deciding whether a bar has finished, or anything
+        comparing an event against a clock rather than against another
+        event. None on a timeframe with no fixed length (MN1, CUSTOM),
+        where a bar's duration is not a constant and must not be guessed.
+        """
+        seconds = self.timeframe.seconds
+        if seconds is None:
+            return None
+        return self.open_time_utc + timedelta(seconds=seconds)
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, InstrumentId):
