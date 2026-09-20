@@ -57,7 +57,7 @@ from vo.valco.lrx_swings import CanonicalSwing, visible_swings
 
 @dataclass(frozen=True, slots=True)
 class BosConfig:
-    method: ConfirmationMethod = ConfirmationMethod.CLOSE
+    method: ConfirmationMethod = ConfirmationMethod.CANDLE_CLOSE
     min_break_points: float = 0.0
     min_break_atr: float = 0.0
     atr_period: int = 14
@@ -123,14 +123,14 @@ def _eligible_swings(
     wanted = SwingType.LOW if mss.direction is MssDirection.BEARISH else SwingType.HIGH
     candidates = [
         swing
-        for swing in visible_swings(swings, at=mss.break_at_utc)
-        if swing.swing_type is wanted and swing.swing_id != mss.swing_id
+        for swing in visible_swings(swings, at=mss.break_time)
+        if swing.swing_type is wanted and swing.swing_id != mss.broken_swing_id
     ]
     if not require_beyond:
         return candidates
     if mss.direction is MssDirection.BEARISH:
-        return [s for s in candidates if s.price < mss.swing_price]
-    return [s for s in candidates if s.price > mss.swing_price]
+        return [s for s in candidates if s.price < mss.broken_price]
+    return [s for s in candidates if s.price > mss.broken_price]
 
 
 def detect_bos(
@@ -178,7 +178,7 @@ def detect_bos(
         target = min(candidates, key=lambda s: s.price)
 
     min_atr_points = 0.0
-    if config.method is ConfirmationMethod.CLOSE_PLUS_ATR:
+    if config.method is ConfirmationMethod.CLOSE_PLUS_ATR_THRESHOLD:
         atr = atr_ticks(bars, index, period=config.atr_period, tick_size=tick_size)
         if atr is None:
             return None
@@ -196,7 +196,7 @@ def detect_bos(
         return None
 
     bearish = mss.direction is MssDirection.BEARISH
-    if config.method is ConfirmationMethod.WICK:
+    if config.method is ConfirmationMethod.WICK_BREAK:
         break_price = bar.low if bearish else bar.high
     else:
         break_price = bar.close
@@ -216,7 +216,7 @@ def detect_bos(
         swing_price=target.price,
         swing_occurred_at=target.occurred_at,
         swing_confirmed_at=target.available_at,
-        distance_from_mss_swing=abs(target.price - mss.swing_price),
+        distance_from_mss_swing=abs(target.price - mss.broken_price),
         break_index=index,
         break_price=break_price,
         break_at_utc=bar.open_time_utc,

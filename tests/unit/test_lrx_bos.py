@@ -17,7 +17,13 @@ from vo.market.identity import InstrumentId
 from vo.market.timeframe import Timeframe
 from vo.observation.swings import SwingLevel, SwingStatus, SwingType
 from vo.valco.lrx_bos import BosConfig, detect_bos, detect_bos_run
-from vo.valco.lrx_mss import ConfirmationMethod, MssDirection, MssEvent, SwingSelection
+from vo.valco.lrx_mss import (
+    ConfirmationMethod,
+    MssDirection,
+    MssEvent,
+    MssQualification,
+    SwingSelection,
+)
 from vo.valco.lrx_swings import CanonicalSwing
 
 _INSTRUMENT = InstrumentId(
@@ -85,20 +91,21 @@ def _mss(
         sweep_id="SWEEP:test",
         displacement_id="DISP:test",
         direction=direction,
-        swing_id=swing_id,
-        swing_price=swing_price,
-        swing_occurred_at=_at(16),
-        swing_confirmed_at=_at(18),
-        swing_selection=SwingSelection.MOST_RECENT,
+        qualification=MssQualification.PASS,
+        broken_swing_id=swing_id,
+        broken_price=swing_price,
+        swing_event_time=_at(16),
+        swing_confirmation_time=_at(18),
+        selection_method=SwingSelection.MOST_RECENT,
         alternate_swing_id=None,
         distance_from_displacement_origin=75.0,
         distance_from_sweep=75.0,
         break_index=break_index,
         break_price=19_965.0,
-        break_at_utc=_at(break_index),
-        break_distance=10.0,
+        break_time=_at(break_index),
+        break_distance_points=10.0,
         break_distance_atr=1.0,
-        confirmation_method=ConfirmationMethod.CLOSE,
+        confirmation_method=ConfirmationMethod.CANDLE_CLOSE,
     )
 
 
@@ -328,8 +335,8 @@ def test_wick_confirms_where_close_does_not() -> None:
     bars.append(_bar(23, open_=19_960.0, high=19_962.0, low=19_945.0, close=19_955.0))
     swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
-    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.CLOSE) is None
-    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.WICK) is not None
+    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.CANDLE_CLOSE) is None
+    assert _detect(bars, _mss(), swings, method=ConfirmationMethod.WICK_BREAK) is not None
 
 
 def test_an_atr_threshold_with_no_atr_available_declines_rather_than_guesses() -> None:
@@ -338,7 +345,7 @@ def test_an_atr_threshold_with_no_atr_available_declines_rather_than_guesses() -
     swings = [_swing("low-deeper", SwingType.LOW, 19_950.0, confirmed_minute=14)]
 
     config = BosConfig(
-        method=ConfirmationMethod.CLOSE_PLUS_ATR, min_break_atr=0.5, atr_period=500
+        method=ConfirmationMethod.CLOSE_PLUS_ATR_THRESHOLD, min_break_atr=0.5, atr_period=500
     )
     assert detect_bos(bars, 23, _mss(), swings, config, tick_size=_TICK) is None
     assert _detect(bars, _mss(), swings) is not None

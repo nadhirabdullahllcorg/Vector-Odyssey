@@ -242,3 +242,76 @@ live_trading:
 """
     with pytest.raises(EAConfigError, match="trading_day_opens"):
         load_ea_config(_write(tmp_path, text))
+
+
+# ── news gate: the two baseline experiment arms ───────────────────────────
+#
+# vo_ea.yaml is tracked but machine-local and deliberately uncommitted, so
+# the deployed value of news_gate_config cannot be asserted from the repo.
+# What CAN be pinned, and is pinned here, is the switch itself: that an
+# empty value means OFF and a path means ON, so the two arms differ by
+# exactly one line of configuration and nothing else.
+#
+#     BASELINE / NEWS_GATE_OFF   news_gate_config: ""
+#     BASELINE / NEWS_GATE_ON    news_gate_config: "config/settings/news_gate.yaml"
+
+_LIVE_ARM = """
+version: 1
+instrument:
+  broker_symbol: "US100.n"
+wire:
+  dir: "/tmp/mt5-files/VectorOdyssey"
+config_files:
+  brokers: "config/settings/brokers.yaml"
+  sessions: "config/settings/sessions.yaml"
+telemetry:
+  host: "127.0.0.1"
+  port: 9999
+logging:
+  path: "logs/vo_ea.log"
+  level: "debug"
+ea_phase: "10"
+live_trading:
+  enabled: true
+  news_gate_config: {value}
+"""
+
+
+def test_an_empty_news_gate_path_switches_the_gate_off(tmp_path: Path) -> None:
+    """OFF is expressed as absence of a config, which ComplianceEngine
+    reads as "never evaluate the gate" -- not as a gate that evaluates
+    and always permits. The difference matters: the second would still
+    consume calendar data and could still fail open on bad data."""
+    config = load_ea_config(_write(tmp_path, _LIVE_ARM.format(value='""')))
+
+    assert config.live_trading is not None
+    assert config.live_trading.news_gate_config_path is None
+
+
+def test_an_omitted_news_gate_path_also_switches_the_gate_off(tmp_path: Path) -> None:
+    text = _LIVE_ARM.format(value='""').replace('  news_gate_config: ""\n', "")
+    config = load_ea_config(_write(tmp_path, text))
+
+    assert config.live_trading is not None
+    assert config.live_trading.news_gate_config_path is None
+
+
+def test_a_news_gate_path_switches_the_gate_on(tmp_path: Path) -> None:
+    config = load_ea_config(
+        _write(tmp_path, _LIVE_ARM.format(value='"config/settings/news_gate.yaml"'))
+    )
+
+    assert config.live_trading is not None
+    assert config.live_trading.news_gate_config_path == Path(
+        "config/settings/news_gate.yaml"
+    )
+
+
+def test_the_news_gate_implementation_survives_being_switched_off() -> None:
+    """Switching the arm off must never mean deleting the gate. If this
+    import ever fails, someone removed the infrastructure instead of
+    configuring it."""
+    from vo.compliance.news_gate import NewsGateConfig, evaluate_news_blackout
+
+    assert callable(evaluate_news_blackout)
+    assert NewsGateConfig is not None
