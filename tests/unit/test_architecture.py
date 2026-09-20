@@ -491,6 +491,7 @@ def test_the_hypothesis_checker_actually_catches_a_violation(tmp_path: Path) -> 
         "vo.valco.lrx_config",
         "vo.valco.lrx_gates",
         "vo.valco.lrx_levels",
+        "vo.valco.lrx_swings",
         "vo.valco.lrx_sweep",
         "vo.telemetry.benchmark",
         "vo.telemetry.live_dispatch",
